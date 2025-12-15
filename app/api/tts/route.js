@@ -31,7 +31,7 @@ export async function POST(request) {
 
     const openai = new OpenAI({ apiKey });
 
-    // Prepare request for OpenAI TTS
+    // Prepare request for OpenAI TTS with fallback defaults
     const ttsModel = process.env.VOICE_MODEL_TTS || 'tts-1';
     const ttsVoice = process.env.TTS_VOICE || 'alloy';
 
@@ -41,7 +41,7 @@ export async function POST(request) {
       voice: ttsVoice,
       input: text,
       response_format: 'mp3',
-      speed: 1.0
+      speed: 1.05
     });
 
     // Get the response as an array buffer

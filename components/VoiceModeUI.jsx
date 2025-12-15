@@ -514,6 +514,31 @@ export default function VoiceModeUI() {
     const remaining = text.substring(startIndex);
     if (remaining.length === 0) return null;
 
+    // For the very first segment, be aggressive to start speaking quickly
+    const isFirstSegment = startIndex === 0 || spokenUpToIndexRef.current === 0;
+    
+    if (isFirstSegment && remaining.length >= 10) {
+      // Look for first natural break (sentence, comma, or just enough words)
+      const firstSentenceEnd = remaining.search(/[.!?]\s/);
+      if (firstSentenceEnd !== -1 && firstSentenceEnd <= 60) {
+        return remaining.substring(0, firstSentenceEnd + 1).trim();
+      }
+      
+      const firstPause = remaining.search(/[,;:]\s/);
+      if (firstPause !== -1 && firstPause >= 10 && firstPause <= 50) {
+        return remaining.substring(0, firstPause + 1).trim();
+      }
+      
+      // Get at least 10-15 chars to start speaking immediately
+      if (remaining.length >= 15) {
+        const chunk = remaining.substring(0, 20);
+        const lastSpace = chunk.lastIndexOf(" ");
+        if (lastSpace > 8) {
+          return chunk.substring(0, lastSpace).trim();
+        }
+      }
+    }
+
     // Split by sentence-ending punctuation
     const sentenceEnd = remaining.search(/[.!?]\s/);
     
@@ -521,21 +546,21 @@ export default function VoiceModeUI() {
       return remaining.substring(0, sentenceEnd + 1).trim();
     }
 
-    // Split by comma for faster start
+    // Split by comma for natural pauses (increased from 15 to 20 for better flow)
     const pauseEnd = remaining.search(/[,;:]\s/);
-    if (pauseEnd !== -1 && pauseEnd >= 15) {
+    if (pauseEnd !== -1 && pauseEnd >= 20) {
       return remaining.substring(0, pauseEnd + 1).trim();
     }
 
-    // If we have enough text, speak it
-    if (remaining.length >= 30) {
+    // If we have enough text, speak it at word boundaries
+    if (remaining.length >= 35) {
       const chunk = remaining.substring(0, 50);
       const lastSpace = chunk.lastIndexOf(" ");
-      if (lastSpace > 15) {
+      if (lastSpace > 20) {
         return chunk.substring(0, lastSpace).trim();
       }
-      if (remaining.length >= 30) {
-        return remaining.substring(0, 30).trim();
+      if (remaining.length >= 35) {
+        return remaining.substring(0, 35).trim();
       }
     }
 
