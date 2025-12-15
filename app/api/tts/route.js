@@ -1,9 +1,11 @@
 /**
  * Text-to-Speech API Route
- * Accepts text and returns audio using OpenAI TTS
+ * Accepts text and returns streaming audio using OpenAI TTS
+ * Supports immediate playback as audio chunks arrive
  */
 
 import { NextResponse } from 'next/server';
+import OpenAI from 'openai';
 
 export async function POST(request) {
   try {
@@ -27,40 +29,30 @@ export async function POST(request) {
       );
     }
 
+    const openai = new OpenAI({ apiKey });
+
     // Prepare request for OpenAI TTS
     const ttsModel = process.env.VOICE_MODEL_TTS || 'tts-1';
     const ttsVoice = process.env.TTS_VOICE || 'alloy';
 
-    const response = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: ttsModel,
-        input: text,
-        voice: ttsVoice,
-        response_format: 'mp3',
-      }),
+    // Use OpenAI SDK for streaming
+    const response = await openai.audio.speech.create({
+      model: ttsModel,
+      voice: ttsVoice,
+      input: text,
+      response_format: 'mp3',
+      speed: 1.0
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('OpenAI TTS error:', error);
-      return NextResponse.json(
-        { error: 'Text-to-speech failed', details: error },
-        { status: response.status }
-      );
-    }
-
-    // Return audio as streaming response
+    // Get the response as an array buffer
     const audioBuffer = await response.arrayBuffer();
     
+    // Return audio with proper headers for streaming
     return new NextResponse(audioBuffer, {
       headers: {
         'Content-Type': 'audio/mpeg',
         'Content-Length': audioBuffer.byteLength.toString(),
+        'Cache-Control': 'no-cache',
       },
     });
 

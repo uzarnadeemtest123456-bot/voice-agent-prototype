@@ -4,10 +4,11 @@ import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { SSEParser } from "@/lib/sse";
 import { getBreathingScale } from "@/lib/audioLevel";
+import { QueuedAudioPlayer } from "@/lib/audioPlayer";
 
 export default function VoiceModeUI() {
   // State management
-  const [status, setStatus] = useState("idle"); // idle, listening, transcribing, thinking, speaking, error
+  const [status, setStatus] = useState("idle"); // idle, listening, thinking, speaking, error
   const [volume, setVolume] = useState(0);
   const [error, setError] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -16,29 +17,38 @@ export default function VoiceModeUI() {
 
   // Refs
   const recognitionRef = useRef(null);
-  const synthesisRef = useRef(null);
   const abortControllerRef = useRef(null);
-  const sessionIdRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const audioPlayerRef = useRef(null);
   const spokenUpToIndexRef = useRef(0);
   const assistantTextBufferRef = useRef("");
-  const processingTTSRef = useRef(false);
-  const isSpeakingRef = useRef(false);
-  const speechQueueRef = useRef([]);
   const accumulatedTranscriptRef = useRef("");
   const silenceTimerRef = useRef(null);
+  const isSpeakingRef = useRef(false);
+  const statusRef = useRef("idle"); // Track status for closures
 
-  // Initialize session ID
+  // Sync status to ref whenever it changes
   useEffect(() => {
-    sessionIdRef.current = generateSessionId();
+    statusRef.current = status;
+  }, [status]);
+
+  // Initialize audio player
+  useEffect(() => {
+
+    audioPlayerRef.current = new QueuedAudioPlayer();
+    
+    audioPlayerRef.current.onStart = () => {
+      isSpeakingRef.current = true;
+    };
+    
+    audioPlayerRef.current.onEnd = () => {
+      isSpeakingRef.current = false;
+      setVolume(0);
+    };
 
     // Check browser support
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
       setError("Your browser doesn't support speech recognition. Please use Chrome, Edge, or Safari.");
-    }
-
-    if (!('speechSynthesis' in window)) {
-      setError("Your browser doesn't support speech synthesis.");
     }
 
     return () => {
@@ -51,9 +61,9 @@ export default function VoiceModeUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, currentAssistantText]);
 
-  // Process TTS for new text chunks
+  // Process TTS for new text chunks (only for streaming responses, not direct responses)
   useEffect(() => {
-    if (status === "speaking" && !processingTTSRef.current) {
+    if (status === "speaking" && audioPlayerRef.current && spokenUpToIndexRef.current > 0) {
       processNextTTSSegment();
     }
   }, [currentAssistantText, status]);
@@ -64,7 +74,7 @@ export default function VoiceModeUI() {
       let animationId;
       const animate = () => {
         const scale = getBreathingScale(Date.now());
-        setVolume(scale - 1); // Convert to 0-0.1 range
+        setVolume(scale - 1);
         animationId = requestAnimationFrame(animate);
       };
       animate();
@@ -78,26 +88,18 @@ export default function VoiceModeUI() {
       let animationId;
       let phase = 0;
       const animate = () => {
-        // Simulate speaking volume with sine wave
         phase += 0.1;
         const simVolume = Math.abs(Math.sin(phase)) * 0.5 + 0.2;
         setVolume(simVolume);
         animationId = requestAnimationFrame(animate);
       };
       animate();
-      return () => {
-        cancelAnimationFrame(animationId);
-      };
+      return () => cancelAnimationFrame(animationId);
     }
   }, [status, isSpeakingRef.current]);
 
-  function generateSessionId() {
-    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-
   async function startListening() {
     try {
-      // Initialize Speech Recognition
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
       
@@ -106,60 +108,39 @@ export default function VoiceModeUI() {
       recognition.lang = 'en-US';
 
       recognition.onresult = (event) => {
-        let interimTranscript = '';
+        // IGNORE all recognition results when not in listening mode
+        if (statusRef.current !== "listening") {
+          console.log("Ignoring recognition (status:", statusRef.current, ")");
+          return;
+        }
+
         let finalTranscript = '';
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const transcript = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
             finalTranscript += transcript + ' ';
-          } else {
-            interimTranscript += transcript;
           }
-        }
-
-        // Detect interruption during speaking
-        if (status === "speaking" && (finalTranscript || interimTranscript)) {
-          console.log("User interrupted assistant");
-          // Stop TTS immediately
-          if (window.speechSynthesis) {
-            window.speechSynthesis.cancel();
-          }
-          isSpeakingRef.current = false;
-          setVolume(0);
-          
-          // Abort the brain stream
-          if (abortControllerRef.current) {
-            abortControllerRef.current.abort();
-          }
-          
-          // Switch to listening mode
-          setStatus("listening");
-          setCurrentAssistantText("");
-          assistantTextBufferRef.current = "";
-          spokenUpToIndexRef.current = 0;
-          accumulatedTranscriptRef.current = "";
         }
 
         if (finalTranscript) {
-          // Accumulate all final transcripts
           accumulatedTranscriptRef.current += finalTranscript;
           setUserTranscript(accumulatedTranscriptRef.current.trim());
           console.log("Accumulated transcript:", accumulatedTranscriptRef.current);
         }
 
-        // Reset silence timer whenever we detect speech
+        // Reset silence timer
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
         }
 
-        // Auto-detect speech end after 0.4 seconds of silence
+        // Auto-detect speech end after 800ms of silence
         silenceTimerRef.current = setTimeout(() => {
-          if (accumulatedTranscriptRef.current.trim().length > 0 && status === "listening") {
-            console.log("Silence detected, auto-processing speech");
+          if (accumulatedTranscriptRef.current.trim().length > 0 && statusRef.current === "listening") {
+            console.log("Processing speech:", accumulatedTranscriptRef.current.trim());
             processUserSpeech();
           }
-        }, 400);
+        }, 800);
       };
 
       recognition.onerror = (event) => {
@@ -171,11 +152,11 @@ export default function VoiceModeUI() {
       };
 
       recognition.onend = () => {
-        console.log("Recognition ended, restarting...");
-        // Auto-restart if still in active mode
-        if (status === "listening" || status === "speaking") {
+        console.log("Recognition ended, checking if should restart. Status:", statusRef.current);
+        if (statusRef.current === "listening" || statusRef.current === "speaking") {
           try {
             recognition.start();
+            console.log("Recognition restarted");
           } catch (e) {
             console.log("Failed to restart recognition:", e);
           }
@@ -191,6 +172,28 @@ export default function VoiceModeUI() {
     }
   }
 
+  function handleInterruption() {
+    // Stop audio immediately
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.stop();
+    }
+    
+    isSpeakingRef.current = false;
+    setVolume(0);
+    
+    // Abort any ongoing requests
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Switch to listening mode
+    setStatus("listening");
+    setCurrentAssistantText("");
+    assistantTextBufferRef.current = "";
+    spokenUpToIndexRef.current = 0;
+    accumulatedTranscriptRef.current = "";
+  }
+
   async function startVoiceMode() {
     try {
       setError(null);
@@ -198,65 +201,9 @@ export default function VoiceModeUI() {
       setMessages([]);
       setCurrentAssistantText("");
       setUserTranscript("");
-      accumulatedTranscriptRef.current = ""; // Reset accumulated transcript
+      accumulatedTranscriptRef.current = "";
 
-      // Initialize Speech Recognition
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
-      
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-
-      recognition.onresult = (event) => {
-        let interimTranscript = '';
-        let finalTranscript = '';
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript + ' ';
-          } else {
-            interimTranscript += transcript;
-          }
-        }
-
-        if (finalTranscript) {
-          // Accumulate all final transcripts
-          accumulatedTranscriptRef.current += finalTranscript;
-          setUserTranscript(accumulatedTranscriptRef.current.trim());
-          console.log("Accumulated transcript:", accumulatedTranscriptRef.current);
-        }
-
-        // Reset silence timer whenever we detect speech
-        if (silenceTimerRef.current) {
-          clearTimeout(silenceTimerRef.current);
-        }
-
-        // Auto-detect speech end after 0.4 seconds of silence
-        silenceTimerRef.current = setTimeout(() => {
-          if (accumulatedTranscriptRef.current.trim().length > 0) {
-            console.log("Silence detected, auto-processing speech");
-            stopVoiceMode();
-          }
-        }, 400); // 1.5 seconds of silence
-      };
-
-      recognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        if (event.error !== 'no-speech') {
-          setError(`Recognition error: ${event.error}`);
-          setStatus("error");
-        }
-      };
-
-      recognition.onend = () => {
-        console.log("Recognition ended");
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-      console.log("Speech recognition started");
+      startListening();
 
     } catch (err) {
       console.error("Error starting voice mode:", err);
@@ -266,54 +213,83 @@ export default function VoiceModeUI() {
   }
 
   async function processUserSpeech() {
-    // Use the accumulated ref directly (more reliable than state)
     const finalTranscript = accumulatedTranscriptRef.current.trim();
     
     console.log("Processing transcript:", finalTranscript);
 
-    // Process the transcript
     if (finalTranscript && finalTranscript.length > 0) {
       setStatus("thinking");
       setMessages((prev) => [...prev, { role: "user", text: finalTranscript }]);
-      await callBrainWebhook(finalTranscript);
+      
+      // Clear transcript for next turn
+      accumulatedTranscriptRef.current = "";
+      setUserTranscript("");
+      
+      await handleUserQuery(finalTranscript);
     }
   }
 
-  async function stopVoiceMode() {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
-    }
-
-    // Small delay to ensure last transcript is captured
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    // Use the accumulated ref directly (more reliable than state)
-    const finalTranscript = accumulatedTranscriptRef.current.trim();
-    
-    console.log("Final transcript:", finalTranscript);
-
-    // Process the transcript
-    if (finalTranscript && finalTranscript.length > 0) {
-      setStatus("thinking");
-      setMessages((prev) => [...prev, { role: "user", text: finalTranscript }]);
-      await callBrainWebhook(finalTranscript);
-    } else {
-      setError("No speech detected. Please try again.");
-      setStatus("error");
-      setTimeout(() => {
-        setStatus("idle");
-        setError(null);
-      }, 3000);
-      cleanup();
-    }
-  }
-
-  async function callBrainWebhook(userText) {
+  async function handleUserQuery(query) {
     setStatus("thinking");
     setCurrentAssistantText("");
     assistantTextBufferRef.current = "";
     spokenUpToIndexRef.current = 0;
+
+    try {
+      // Step 1: Classify intent and get direct response if applicable
+      const intentResponse = await fetch('/api/chat/intent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query,
+          conversationHistory: messages.slice(-6) // Last 6 messages for context
+        }),
+      });
+
+      if (!intentResponse.ok) {
+        throw new Error('Intent classification failed');
+      }
+
+      const intentData = await intentResponse.json();
+      console.log('Intent classification:', intentData);
+
+      // Step 2: Route based on intent
+      if (intentData.intent === 'direct_reply' && intentData.response) {
+        // Use the direct response from OpenAI
+        await handleDirectResponse(intentData.response);
+      } else {
+        // Call n8n for tool-based queries
+        await callBrainWebhook(query);
+      }
+
+    } catch (err) {
+      console.error("Error handling query:", err);
+      setError(`Error: ${err.message}`);
+      setStatus("error");
+      
+      // Auto-recovery
+      setTimeout(() => {
+        setStatus("listening");
+        setError(null);
+      }, 3000);
+    }
+  }
+
+  async function handleDirectResponse(responseText) {
+    console.log("Using direct response:", responseText);
+    
+    // Set response text immediately but DON'T trigger useEffect
+    assistantTextBufferRef.current = responseText;
+    setStatus("speaking"); // Recognition will ignore input in this status
+    
+    // Start TTS processing (this handles everything, no need for useEffect)
+    await processCompleteResponse(responseText);
+  }
+
+  async function callBrainWebhook(userText) {
+    setStatus("thinking");
 
     try {
       const webhookUrl = process.env.NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL;
@@ -322,7 +298,6 @@ export default function VoiceModeUI() {
         throw new Error("N8N_BRAIN_WEBHOOK_URL not configured");
       }
 
-      // Create abort controller for cancellation
       abortControllerRef.current = new AbortController();
 
       const response = await fetch(webhookUrl, {
@@ -355,10 +330,7 @@ export default function VoiceModeUI() {
         console.log("Brain request aborted");
         return;
       }
-      console.error("Error calling brain webhook:", err);
-      setError(`Brain error: ${err.message}`);
-      setStatus("error");
-      cleanup();
+      throw err;
     }
   }
 
@@ -367,7 +339,8 @@ export default function VoiceModeUI() {
     const decoder = new TextDecoder();
     const parser = new SSEParser();
 
-    setStatus("speaking");
+    setStatus("speaking"); // Recognition will ignore input in this status
+    spokenUpToIndexRef.current = 1; // Enable streaming TTS processing
 
     try {
       while (true) {
@@ -391,7 +364,6 @@ export default function VoiceModeUI() {
         }
       }
 
-      // Stream ended
       await finishAssistantResponse();
 
     } catch (err) {
@@ -407,63 +379,46 @@ export default function VoiceModeUI() {
     const decoder = new TextDecoder();
     let buffer = "";
 
-    setStatus("speaking");
+    setStatus("speaking"); // Recognition will ignore input in this status
+    spokenUpToIndexRef.current = 1; // Enable streaming TTS processing
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        // Decode the chunk
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
 
-        // Split by newlines to get individual JSON objects
         const lines = buffer.split('\n');
-        
-        // Keep the last incomplete line in the buffer
         buffer = lines.pop() || '';
 
-        // Process each complete line
         for (const line of lines) {
           if (!line.trim()) continue;
 
           try {
             const jsonObj = JSON.parse(line);
             
-            // Extract content from "item" type messages ONLY
             if (jsonObj.type === "item" && jsonObj.content) {
-              // Check if content is a stringified JSON containing "output" field
               try {
                 const contentObj = JSON.parse(jsonObj.content);
                 if (contentObj.output) {
-                  // Skip this - it's the final wrapped output
                   console.log("Skipping final wrapped output");
                   continue;
                 }
               } catch (e) {
-                // Content is not JSON, it's regular text - use it
+                // Content is regular text
               }
               
-              // Add the content
               assistantTextBufferRef.current += jsonObj.content;
               setCurrentAssistantText(assistantTextBufferRef.current);
-              console.log("Received content:", jsonObj.content);
-            } else if (jsonObj.type === "begin") {
-              console.log("Stream started");
-            } else if (jsonObj.type === "end") {
-              console.log("Stream ended");
-            } else if (jsonObj.output) {
-              // Ignore the final output summary
-              console.log("Ignoring final output summary");
             }
           } catch (parseError) {
-            console.error("Error parsing JSON line:", line, parseError);
+            console.error("Error parsing JSON line:", parseError);
           }
         }
       }
 
-      // Process any remaining buffer
       if (buffer.trim()) {
         try {
           const jsonObj = JSON.parse(buffer);
@@ -472,7 +427,7 @@ export default function VoiceModeUI() {
             setCurrentAssistantText(assistantTextBufferRef.current);
           }
         } catch (e) {
-          // Ignore parse errors on incomplete data
+          // Ignore
         }
       }
 
@@ -486,11 +441,26 @@ export default function VoiceModeUI() {
     }
   }
 
+  async function processCompleteResponse(text) {
+    // Show the text in UI immediately
+    setCurrentAssistantText(text);
+    
+    // Process entire response for TTS
+    const segments = splitIntoSegments(text);
+    
+    for (const segment of segments) {
+      if (segment.trim()) {
+        await audioPlayerRef.current.addToQueue(segment.trim());
+      }
+    }
+    
+    await waitForPlaybackComplete();
+    await finishAssistantResponse();
+  }
+
   async function finishAssistantResponse() {
     // Wait for all TTS to complete
-    while (speechQueueRef.current.length > 0 || isSpeakingRef.current) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    await waitForPlaybackComplete();
 
     // Add final message
     if (assistantTextBufferRef.current) {
@@ -500,46 +470,43 @@ export default function VoiceModeUI() {
     setCurrentAssistantText("");
     setVolume(0);
     
-    // Auto-restart listening for continuous conversation
+    // Auto-restart listening (recognition is already running, just change status)
     setStatus("listening");
     accumulatedTranscriptRef.current = "";
     setUserTranscript("");
-    startListening();
+    
+    // Resume audio player for next turn
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.resume();
+    }
+    
+    console.log("Ready for next turn");
+  }
+
+  async function waitForPlaybackComplete() {
+    while (audioPlayerRef.current.isProcessing || isSpeakingRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   async function processNextTTSSegment() {
-    if (processingTTSRef.current) return;
-    processingTTSRef.current = true;
+    const fullText = assistantTextBufferRef.current;
+    const spokenUpTo = spokenUpToIndexRef.current;
 
-    try {
-      const fullText = assistantTextBufferRef.current;
-      const spokenUpTo = spokenUpToIndexRef.current;
+    if (spokenUpTo >= fullText.length) {
+      return;
+    }
 
-      if (spokenUpTo >= fullText.length) {
-        processingTTSRef.current = false;
-        return;
-      }
+    const segment = extractNextSegment(fullText, spokenUpTo);
 
-      // Extract next speakable segment
-      const segment = extractNextSegment(fullText, spokenUpTo);
-
-      if (segment) {
-        spokenUpToIndexRef.current += segment.length;
-        
-        // Speak using browser TTS
-        await speakText(segment);
-      }
-
-      processingTTSRef.current = false;
+    if (segment) {
+      spokenUpToIndexRef.current += segment.length;
+      await audioPlayerRef.current.addToQueue(segment.trim());
       
-      // Check if there's more to process
+      // Check if there's more
       if (spokenUpToIndexRef.current < assistantTextBufferRef.current.length) {
         setTimeout(() => processNextTTSSegment(), 50);
       }
-
-    } catch (err) {
-      console.error("TTS processing error:", err);
-      processingTTSRef.current = false;
     }
   }
 
@@ -554,86 +521,47 @@ export default function VoiceModeUI() {
       return remaining.substring(0, sentenceEnd + 1).trim();
     }
 
-    // Split by comma or other pauses for faster TTS start
+    // Split by comma for faster start
     const pauseEnd = remaining.search(/[,;:]\s/);
     if (pauseEnd !== -1 && pauseEnd >= 15) {
       return remaining.substring(0, pauseEnd + 1).trim();
     }
 
-    // If we have a decent amount of text (reduced from 180 to 30), speak it
+    // If we have enough text, speak it
     if (remaining.length >= 30) {
-      // Find last space before 50 chars (reduced from 220)
       const chunk = remaining.substring(0, 50);
       const lastSpace = chunk.lastIndexOf(" ");
       if (lastSpace > 15) {
         return chunk.substring(0, lastSpace).trim();
       }
-      // If we have at least 30 chars, speak them even without space
       if (remaining.length >= 30) {
         return remaining.substring(0, 30).trim();
       }
     }
 
-    // Not enough yet, wait for more
     return null;
   }
 
-  async function speakText(text) {
-    return new Promise((resolve, reject) => {
-      if (!window.speechSynthesis) {
-        resolve();
-        return;
-      }
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
-
-      // Firefox compatibility: get voices explicitly
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        // Try to use a natural sounding voice
-        const preferredVoice = voices.find(voice => voice.lang.startsWith('en')) || voices[0];
-        utterance.voice = preferredVoice;
-      }
-
-      utterance.onstart = () => {
-        isSpeakingRef.current = true;
-      };
-
-      utterance.onend = () => {
-        isSpeakingRef.current = false;
-        setVolume(0);
-        resolve();
-      };
-
-      utterance.onerror = (event) => {
-        // Only log actual errors, not normal interruptions
-        if (event.error !== 'interrupted' && event.error !== 'canceled') {
-          console.error("Speech synthesis error:", event.error);
-        }
-        isSpeakingRef.current = false;
-        setVolume(0);
-        resolve(); // Don't reject, just continue
-      };
-
-      speechQueueRef.current.push(utterance);
-      
-      // Firefox fix: Ensure voices are loaded
-      if (window.speechSynthesis.getVoices().length === 0) {
-        window.speechSynthesis.addEventListener('voiceschanged', () => {
-          const voices = window.speechSynthesis.getVoices();
-          if (voices.length > 0) {
-            utterance.voice = voices.find(v => v.lang.startsWith('en')) || voices[0];
-          }
-          window.speechSynthesis.speak(utterance);
-        }, { once: true });
+  function splitIntoSegments(text) {
+    // Split text into speakable segments
+    const segments = [];
+    let currentPos = 0;
+    
+    while (currentPos < text.length) {
+      const segment = extractNextSegment(text, currentPos);
+      if (segment) {
+        segments.push(segment);
+        currentPos += segment.length;
       } else {
-        // Speak the utterance
-        window.speechSynthesis.speak(utterance);
+        // Add remaining text
+        if (currentPos < text.length) {
+          segments.push(text.substring(currentPos));
+        }
+        break;
       }
-    });
+    }
+    
+    return segments;
   }
 
   function cleanup() {
@@ -647,44 +575,36 @@ export default function VoiceModeUI() {
       recognitionRef.current = null;
     }
 
-    // Abort brain request
+    // Abort requests
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
-    // Stop speech synthesis
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
+    // Stop audio
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.stop();
     }
 
     // Reset refs
     spokenUpToIndexRef.current = 0;
     assistantTextBufferRef.current = "";
-    processingTTSRef.current = false;
     isSpeakingRef.current = false;
-    speechQueueRef.current = [];
   }
 
   async function handleStop() {
-    if (status === "listening") {
-      await stopVoiceMode();
-    } else {
-      setStatus("idle");
-      cleanup();
-    }
+    setStatus("idle");
+    cleanup();
   }
 
-  // Calculate circle scale
   const circleScale = 1 + volume * 1.5;
 
-  // Status display text
   const getStatusText = () => {
     switch (status) {
       case "idle":
         return "Click Start to begin your conversation";
       case "listening":
-        return "Listening... Speak now, then click Stop";
+        return "Listening... (speak naturally, I'll detect when you're done)";
       case "thinking":
         return "Thinking...";
       case "speaking":
@@ -707,6 +627,7 @@ export default function VoiceModeUI() {
           <div className="text-center space-y-2">
             <h1 className="text-4xl font-bold text-white">Voice Mode</h1>
             <p className="text-gray-400">{getStatusText()}</p>
+            <p className="text-xs text-gray-500">Optimized: Browser STT + OpenAI Intelligence + Streaming TTS</p>
           </div>
 
           {/* Error Display */}
@@ -738,7 +659,6 @@ export default function VoiceModeUI() {
               />
             </motion.div>
 
-            {/* Inner circle */}
             <motion.div
               animate={{
                 scale: circleScale * 0.8,
@@ -751,7 +671,6 @@ export default function VoiceModeUI() {
               className="absolute w-48 h-48 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 opacity-70"
             />
 
-            {/* Center dot */}
             <div className="absolute w-4 h-4 rounded-full bg-white" />
           </div>
 
@@ -798,9 +717,9 @@ export default function VoiceModeUI() {
           {/* Instructions */}
           {status === "idle" && (
             <div className="text-center text-sm text-gray-500 space-y-1">
-              <p>Click Start, then speak your message</p>
-              <p className="text-xs">Click Stop when you're done speaking</p>
-              <p className="text-xs mt-2 text-gray-600">Using browser's built-in speech recognition (Free!)</p>
+              <p>Click Start, then speak naturally</p>
+              <p className="text-xs">Auto-detects when you finish speaking</p>
+              <p className="text-xs mt-2 text-gray-600">Free STT + Smart AI Routing + Premium TTS</p>
             </div>
           )}
         </div>
@@ -841,7 +760,6 @@ export default function VoiceModeUI() {
                 </motion.div>
               ))}
 
-              {/* Current streaming assistant response */}
               {currentAssistantText && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
@@ -862,7 +780,6 @@ export default function VoiceModeUI() {
                 </motion.div>
               )}
 
-              {/* Processing status */}
               {status === "thinking" && !currentAssistantText && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
@@ -888,7 +805,6 @@ export default function VoiceModeUI() {
         )}
       </div>
 
-      {/* Custom Scrollbar Styles */}
       <style jsx>{`
         .custom-scrollbar::-webkit-scrollbar {
           width: 8px;
@@ -908,7 +824,6 @@ export default function VoiceModeUI() {
           background: linear-gradient(180deg, #9333ea, #db2777);
         }
 
-        /* Firefox */
         .custom-scrollbar {
           scrollbar-width: thin;
           scrollbar-color: #a855f7 rgba(0, 0, 0, 0.2);
