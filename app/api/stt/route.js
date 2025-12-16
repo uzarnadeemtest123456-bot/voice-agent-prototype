@@ -1,9 +1,11 @@
 /**
- * Speech-to-Text API Route
- * Accepts audio file and returns transcribed text using OpenAI Whisper
+ * Cross-Browser Speech-to-Text API using OpenAI Whisper
+ * Works on ALL browsers (Firefox, Tor, Brave, Chrome, etc.)
+ * Accepts audio blob and returns transcribed text
  */
 
 import { NextResponse } from 'next/server';
+import OpenAI from 'openai';
 
 export async function POST(request) {
   try {
@@ -16,7 +18,7 @@ export async function POST(request) {
       );
     }
 
-    // Parse form data
+    // Get audio blob from form data
     const formData = await request.formData();
     const audioFile = formData.get('audio');
     
@@ -27,45 +29,33 @@ export async function POST(request) {
       );
     }
 
-    // Prepare form data for OpenAI
-    const openaiFormData = new FormData();
-    openaiFormData.append('file', audioFile);
-    openaiFormData.append('model', process.env.VOICE_MODEL_STT || 'whisper-1');
-    openaiFormData.append('response_format', 'json');
+    const openai = new OpenAI({ apiKey });
 
-    // Call OpenAI Whisper API
-    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: openaiFormData,
+    // Convert blob to File object for Whisper API
+    const file = new File([audioFile], 'audio.webm', { type: 'audio/webm' });
+
+    // Transcribe using Whisper
+    const transcription = await openai.audio.transcriptions.create({
+      file: file,
+      model: 'whisper-1',
+      language: 'en', // Specify language for better accuracy
+      response_format: 'json'
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('OpenAI STT error:', error);
-      return NextResponse.json(
-        { error: 'Speech-to-text failed', details: error },
-        { status: response.status }
-      );
-    }
+    console.log('Whisper transcription:', transcription.text);
 
-    const result = await response.json();
-    
     return NextResponse.json({
-      text: result.text || '',
-      language: result.language,
+      text: transcription.text,
+      success: true
     });
 
   } catch (error) {
-    console.error('STT API error:', error);
+    console.error('Whisper STT error:', error);
     return NextResponse.json(
-      { error: 'Internal server error', message: error.message },
+      { error: 'Speech recognition failed', message: error.message },
       { status: 500 }
     );
   }
 }
 
-// Export runtime config for Node.js features
 export const runtime = 'nodejs';

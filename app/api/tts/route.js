@@ -1,24 +1,22 @@
 /**
- * Text-to-Speech API Route
- * Accepts text and returns streaming audio using OpenAI TTS
- * Supports immediate playback as audio chunks arrive
+ * Text-to-Speech API Route using ElevenLabs
+ * Much better quality than OpenAI TTS - natural, emotional, no stuttering
+ * Supports streaming for instant playback
  */
 
 import { NextResponse } from 'next/server';
-import OpenAI from 'openai';
 
 export async function POST(request) {
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.ELEVENLABS_API_KEY;
     
     if (!apiKey) {
       return NextResponse.json(
-        { error: 'OPENAI_API_KEY not configured' },
+        { error: 'ELEVENLABS_API_KEY not configured. Please add it to .env.local' },
         { status: 500 }
       );
     }
 
-    // Parse JSON body
     const body = await request.json();
     const text = body.text;
     
@@ -29,25 +27,45 @@ export async function POST(request) {
       );
     }
 
-    const openai = new OpenAI({ apiKey });
+    // ElevenLabs voice ID (default: Rachel - natural, warm, clear)
+    // Other good voices: 21m00Tcm4TlvDq8ikWAM (Rachel), EXAVITQu4vr4xnSDxMaL (Bella)
+    const voiceId = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+    
+    // Call ElevenLabs TTS API with streaming
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': apiKey
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: 'eleven_turbo_v2_5', // Fast model with great quality
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            use_speaker_boost: true
+          }
+        })
+      }
+    );
 
-    // Prepare request for OpenAI TTS with fallback defaults
-    const ttsModel = process.env.VOICE_MODEL_TTS || 'tts-1';
-    const ttsVoice = process.env.TTS_VOICE || 'alloy';
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('ElevenLabs API error:', response.status, errorText);
+      return NextResponse.json(
+        { error: `ElevenLabs API failed: ${response.status}`, details: errorText },
+        { status: response.status }
+      );
+    }
 
-    // Use OpenAI SDK for streaming
-    const response = await openai.audio.speech.create({
-      model: ttsModel,
-      voice: ttsVoice,
-      input: text,
-      response_format: 'mp3',
-      speed: 1.05
-    });
-
-    // Get the response as an array buffer
+    // Stream the audio directly to the client
     const audioBuffer = await response.arrayBuffer();
     
-    // Return audio with proper headers for streaming
     return new NextResponse(audioBuffer, {
       headers: {
         'Content-Type': 'audio/mpeg',
@@ -65,5 +83,4 @@ export async function POST(request) {
   }
 }
 
-// Export runtime config for Node.js features
 export const runtime = 'nodejs';

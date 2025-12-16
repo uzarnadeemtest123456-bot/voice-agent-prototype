@@ -16,25 +16,24 @@ export default function VoiceModeUI() {
   const [userTranscript, setUserTranscript] = useState("");
 
   // Refs
-  const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const abortControllerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const audioPlayerRef = useRef(null);
   const spokenUpToIndexRef = useRef(0);
   const assistantTextBufferRef = useRef("");
-  const accumulatedTranscriptRef = useRef("");
-  const silenceTimerRef = useRef(null);
   const isSpeakingRef = useRef(false);
-  const statusRef = useRef("idle"); // Track status for closures
+  const statusRef = useRef("idle");
+  const streamRef = useRef(null);
 
-  // Sync status to ref whenever it changes
+  // Sync status to ref
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
   // Initialize audio player
   useEffect(() => {
-
     audioPlayerRef.current = new QueuedAudioPlayer();
     
     audioPlayerRef.current.onStart = () => {
@@ -46,11 +45,6 @@ export default function VoiceModeUI() {
       setVolume(0);
     };
 
-    // Check browser support
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      setError("Your browser doesn't support speech recognition. Please use Chrome, Edge, or Safari.");
-    }
-
     return () => {
       cleanup();
     };
@@ -61,7 +55,7 @@ export default function VoiceModeUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, currentAssistantText]);
 
-  // Process TTS for new text chunks (only for streaming responses, not direct responses)
+  // Process TTS for streaming responses
   useEffect(() => {
     if (status === "speaking" && audioPlayerRef.current && spokenUpToIndexRef.current > 0) {
       processNextTTSSegment();
@@ -100,98 +94,114 @@ export default function VoiceModeUI() {
 
   async function startListening() {
     try {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
+      // Request microphone access - works on ALL browsers
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true
+        } 
+      });
       
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
+      streamRef.current = stream;
+      audioChunksRef.current = [];
 
-      recognition.onresult = (event) => {
-        // IGNORE all recognition results when not in listening mode
-        if (statusRef.current !== "listening") {
-          console.log("Ignoring recognition (status:", statusRef.current, ")");
-          return;
-        }
+      // Create MediaRecorder - works on Firefox, Chrome, Brave, Tor, etc.
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+      });
+      
+      mediaRecorderRef.current = mediaRecorder;
 
-        let finalTranscript = '';
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript + ' ';
-          }
-        }
-
-        if (finalTranscript) {
-          accumulatedTranscriptRef.current += finalTranscript;
-          setUserTranscript(accumulatedTranscriptRef.current.trim());
-          console.log("Accumulated transcript:", accumulatedTranscriptRef.current);
-        }
-
-        // Reset silence timer
-        if (silenceTimerRef.current) {
-          clearTimeout(silenceTimerRef.current);
-        }
-
-        // Auto-detect speech end after 800ms of silence
-        silenceTimerRef.current = setTimeout(() => {
-          if (accumulatedTranscriptRef.current.trim().length > 0 && statusRef.current === "listening") {
-            console.log("Processing speech:", accumulatedTranscriptRef.current.trim());
-            processUserSpeech();
-          }
-        }, 800);
-      };
-
-      recognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        if (event.error !== 'no-speech' && event.error !== 'aborted') {
-          setError(`Recognition error: ${event.error}`);
-          setStatus("error");
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
         }
       };
 
-      recognition.onend = () => {
-        console.log("Recognition ended, checking if should restart. Status:", statusRef.current);
-        if (statusRef.current === "listening" || statusRef.current === "speaking") {
-          try {
-            recognition.start();
-            console.log("Recognition restarted");
-          } catch (e) {
-            console.log("Failed to restart recognition:", e);
-          }
+      mediaRecorder.onstop = async () => {
+        if (audioChunksRef.current.length > 0) {
+          await processRecording();
         }
       };
 
-      recognitionRef.current = recognition;
-      recognition.start();
-      console.log("Speech recognition started");
+      mediaRecorder.start();
+      console.log("Recording started (cross-browser support)");
 
     } catch (err) {
-      console.error("Error starting listening:", err);
+      console.error("Error accessing microphone:", err);
+      setError("Could not access microphone. Please grant permission.");
+      setStatus("error");
     }
   }
 
-  function handleInterruption() {
-    // Stop audio immediately
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.stop();
+  function stopListening() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
     }
     
-    isSpeakingRef.current = false;
-    setVolume(0);
-    
-    // Abort any ongoing requests
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
+  }
+
+  async function processRecording() {
+    const audioBlob = new Blob(audioChunksRef.current, { 
+      type: audioChunksRef.current[0]?.type || 'audio/webm' 
+    });
     
-    // Switch to listening mode
-    setStatus("listening");
-    setCurrentAssistantText("");
-    assistantTextBufferRef.current = "";
-    spokenUpToIndexRef.current = 0;
-    accumulatedTranscriptRef.current = "";
+    // Must have at least some audio data
+    if (audioBlob.size < 1000) {
+      console.log("Recording too short, ignoring");
+      setStatus("listening");
+      await startListening(); // Restart listening
+      return;
+    }
+
+    setStatus("thinking");
+    setUserTranscript("Transcribing...");
+
+    try {
+      // Call Whisper API for transcription
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+
+      const sttResponse = await fetch('/api/stt', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!sttResponse.ok) {
+        throw new Error('Transcription failed');
+      }
+
+      const sttData = await sttResponse.json();
+      const transcript = sttData.text.trim();
+      
+      console.log("Whisper transcript:", transcript);
+
+      if (transcript.length > 0) {
+        setUserTranscript(transcript);
+        setMessages((prev) => [...prev, { role: "user", text: transcript }]);
+        await handleUserQuery(transcript);
+      } else {
+        setStatus("listening");
+        await startListening();
+      }
+
+    } catch (err) {
+      console.error("Error processing recording:", err);
+      setError(`Error: ${err.message}`);
+      setStatus("error");
+      
+      setTimeout(() => {
+        setStatus("listening");
+        setError(null);
+        startListening();
+      }, 3000);
+    }
   }
 
   async function startVoiceMode() {
@@ -200,32 +210,14 @@ export default function VoiceModeUI() {
       setStatus("listening");
       setMessages([]);
       setCurrentAssistantText("");
-      setUserTranscript("");
-      accumulatedTranscriptRef.current = "";
+      setUserTranscript("Press Stop when you finish speaking...");
 
-      startListening();
+      await startListening();
 
     } catch (err) {
       console.error("Error starting voice mode:", err);
       setError(`Error: ${err.message}`);
       setStatus("error");
-    }
-  }
-
-  async function processUserSpeech() {
-    const finalTranscript = accumulatedTranscriptRef.current.trim();
-    
-    console.log("Processing transcript:", finalTranscript);
-
-    if (finalTranscript && finalTranscript.length > 0) {
-      setStatus("thinking");
-      setMessages((prev) => [...prev, { role: "user", text: finalTranscript }]);
-      
-      // Clear transcript for next turn
-      accumulatedTranscriptRef.current = "";
-      setUserTranscript("");
-      
-      await handleUserQuery(finalTranscript);
     }
   }
 
@@ -236,56 +228,41 @@ export default function VoiceModeUI() {
     spokenUpToIndexRef.current = 0;
 
     try {
-      // Step 1: Classify intent and get direct response if applicable
-      const intentResponse = await fetch('/api/chat/intent', {
+      // Step 1: Rephrase/clean the query using OpenAI
+      const rephraseResponse = await fetch('/api/rephrase', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          query,
-          conversationHistory: messages.slice(-6) // Last 6 messages for context
-        }),
+        body: JSON.stringify({ query }),
       });
 
-      if (!intentResponse.ok) {
-        throw new Error('Intent classification failed');
+      if (!rephraseResponse.ok) {
+        throw new Error('Query rephrasing failed');
       }
 
-      const intentData = await intentResponse.json();
-      console.log('Intent classification:', intentData);
+      const rephraseData = await rephraseResponse.json();
+      const cleanedQuery = rephraseData.rephrased;
+      
+      console.log('Rephrased query:', {
+        original: query,
+        cleaned: cleanedQuery
+      });
 
-      // Step 2: Route based on intent
-      if (intentData.intent === 'direct_reply' && intentData.response) {
-        // Use the direct response from OpenAI
-        await handleDirectResponse(intentData.response);
-      } else {
-        // Call n8n for tool-based queries
-        await callBrainWebhook(query);
-      }
+      // Step 2: Send cleaned query directly to n8n
+      await callBrainWebhook(cleanedQuery);
 
     } catch (err) {
       console.error("Error handling query:", err);
       setError(`Error: ${err.message}`);
       setStatus("error");
       
-      // Auto-recovery
       setTimeout(() => {
         setStatus("listening");
         setError(null);
+        startListening();
       }, 3000);
     }
-  }
-
-  async function handleDirectResponse(responseText) {
-    console.log("Using direct response:", responseText);
-    
-    // Set response text immediately but DON'T trigger useEffect
-    assistantTextBufferRef.current = responseText;
-    setStatus("speaking"); // Recognition will ignore input in this status
-    
-    // Start TTS processing (this handles everything, no need for useEffect)
-    await processCompleteResponse(responseText);
   }
 
   async function callBrainWebhook(userText) {
@@ -314,7 +291,7 @@ export default function VoiceModeUI() {
       });
 
       if (!response.ok) {
-        throw new Error(`Brain webhook failed: ${response.status}`);
+        throw new Error(`n8n webhook failed: ${response.status}`);
       }
 
       const contentType = response.headers.get("content-type");
@@ -327,7 +304,7 @@ export default function VoiceModeUI() {
 
     } catch (err) {
       if (err.name === "AbortError") {
-        console.log("Brain request aborted");
+        console.log("n8n request aborted");
         return;
       }
       throw err;
@@ -339,8 +316,8 @@ export default function VoiceModeUI() {
     const decoder = new TextDecoder();
     const parser = new SSEParser();
 
-    setStatus("speaking"); // Recognition will ignore input in this status
-    spokenUpToIndexRef.current = 1; // Enable streaming TTS processing
+    setStatus("speaking");
+    spokenUpToIndexRef.current = 1; // Enable streaming TTS
 
     try {
       while (true) {
@@ -379,8 +356,8 @@ export default function VoiceModeUI() {
     const decoder = new TextDecoder();
     let buffer = "";
 
-    setStatus("speaking"); // Recognition will ignore input in this status
-    spokenUpToIndexRef.current = 1; // Enable streaming TTS processing
+    setStatus("speaking");
+    spokenUpToIndexRef.current = 1; // Enable streaming TTS
 
     try {
       while (true) {
@@ -441,23 +418,6 @@ export default function VoiceModeUI() {
     }
   }
 
-  async function processCompleteResponse(text) {
-    // Show the text in UI immediately
-    setCurrentAssistantText(text);
-    
-    // Process entire response for TTS
-    const segments = splitIntoSegments(text);
-    
-    for (const segment of segments) {
-      if (segment.trim()) {
-        await audioPlayerRef.current.addToQueue(segment.trim());
-      }
-    }
-    
-    await waitForPlaybackComplete();
-    await finishAssistantResponse();
-  }
-
   async function finishAssistantResponse() {
     // Wait for all TTS to complete
     await waitForPlaybackComplete();
@@ -468,18 +428,17 @@ export default function VoiceModeUI() {
     }
 
     setCurrentAssistantText("");
+    setUserTranscript("");
     setVolume(0);
     
-    // Auto-restart listening (recognition is already running, just change status)
+    // Auto-restart listening for next turn
     setStatus("listening");
-    accumulatedTranscriptRef.current = "";
-    setUserTranscript("");
     
-    // Resume audio player for next turn
     if (audioPlayerRef.current) {
       audioPlayerRef.current.resume();
     }
     
+    await startListening();
     console.log("Ready for next turn");
   }
 
@@ -514,11 +473,10 @@ export default function VoiceModeUI() {
     const remaining = text.substring(startIndex);
     if (remaining.length === 0) return null;
 
-    // For the very first segment, be aggressive to start speaking quickly
-    const isFirstSegment = startIndex === 0 || spokenUpToIndexRef.current === 0;
+    // For first segment, start speaking quickly
+    const isFirstSegment = spokenUpToIndexRef.current === 1;
     
     if (isFirstSegment && remaining.length >= 10) {
-      // Look for first natural break (sentence, comma, or just enough words)
       const firstSentenceEnd = remaining.search(/[.!?]\s/);
       if (firstSentenceEnd !== -1 && firstSentenceEnd <= 60) {
         return remaining.substring(0, firstSentenceEnd + 1).trim();
@@ -529,7 +487,6 @@ export default function VoiceModeUI() {
         return remaining.substring(0, firstPause + 1).trim();
       }
       
-      // Get at least 10-15 chars to start speaking immediately
       if (remaining.length >= 15) {
         const chunk = remaining.substring(0, 20);
         const lastSpace = chunk.lastIndexOf(" ");
@@ -539,20 +496,19 @@ export default function VoiceModeUI() {
       }
     }
 
-    // Split by sentence-ending punctuation
+    // Split by sentence
     const sentenceEnd = remaining.search(/[.!?]\s/);
-    
     if (sentenceEnd !== -1) {
       return remaining.substring(0, sentenceEnd + 1).trim();
     }
 
-    // Split by comma for natural pauses (increased from 15 to 20 for better flow)
+    // Split by comma
     const pauseEnd = remaining.search(/[,;:]\s/);
     if (pauseEnd !== -1 && pauseEnd >= 20) {
       return remaining.substring(0, pauseEnd + 1).trim();
     }
 
-    // If we have enough text, speak it at word boundaries
+    // Word boundaries
     if (remaining.length >= 35) {
       const chunk = remaining.substring(0, 50);
       const lastSpace = chunk.lastIndexOf(" ");
@@ -567,57 +523,32 @@ export default function VoiceModeUI() {
     return null;
   }
 
-  function splitIntoSegments(text) {
-    // Split text into speakable segments
-    const segments = [];
-    let currentPos = 0;
-    
-    while (currentPos < text.length) {
-      const segment = extractNextSegment(text, currentPos);
-      if (segment) {
-        segments.push(segment);
-        currentPos += segment.length;
-      } else {
-        // Add remaining text
-        if (currentPos < text.length) {
-          segments.push(text.substring(currentPos));
-        }
-        break;
-      }
-    }
-    
-    return segments;
-  }
-
   function cleanup() {
-    // Stop recognition
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        // Already stopped
-      }
-      recognitionRef.current = null;
-    }
+    stopListening();
 
-    // Abort requests
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
-    // Stop audio
     if (audioPlayerRef.current) {
       audioPlayerRef.current.stop();
     }
 
-    // Reset refs
     spokenUpToIndexRef.current = 0;
     assistantTextBufferRef.current = "";
     isSpeakingRef.current = false;
+    audioChunksRef.current = [];
   }
 
   async function handleStop() {
+    // If we're currently listening, stop recording and process what we have
+    if (status === "listening" && mediaRecorderRef.current) {
+      stopListening();
+      return;
+    }
+    
+    // Otherwise, fully stop the voice mode
     setStatus("idle");
     cleanup();
   }
@@ -629,9 +560,9 @@ export default function VoiceModeUI() {
       case "idle":
         return "Click Start to begin your conversation";
       case "listening":
-        return "Listening... (speak naturally, I'll detect when you're done)";
+        return "Recording... Click Stop when you finish speaking";
       case "thinking":
-        return "Thinking...";
+        return "Processing...";
       case "speaking":
         return "Speaking...";
       case "error":
@@ -652,7 +583,7 @@ export default function VoiceModeUI() {
           <div className="text-center space-y-2">
             <h1 className="text-4xl font-bold text-white">Voice Mode</h1>
             <p className="text-gray-400">{getStatusText()}</p>
-            <p className="text-xs text-gray-500">Optimized: Browser STT + OpenAI Intelligence + Streaming TTS</p>
+            <p className="text-xs text-gray-500">Universal: Whisper STT + OpenAI Cleanup + n8n + ElevenLabs TTS</p>
           </div>
 
           {/* Error Display */}
@@ -718,7 +649,7 @@ export default function VoiceModeUI() {
                 onClick={handleStop}
                 className="px-8 py-4 rounded-full font-semibold text-white bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 transition-all transform hover:scale-105 shadow-lg hover:shadow-red-500/50"
               >
-                Stop
+                {status === "listening" ? "Stop Speaking" : "Stop"}
               </button>
             )}
           </div>
@@ -742,9 +673,9 @@ export default function VoiceModeUI() {
           {/* Instructions */}
           {status === "idle" && (
             <div className="text-center text-sm text-gray-500 space-y-1">
-              <p>Click Start, then speak naturally</p>
-              <p className="text-xs">Auto-detects when you finish speaking</p>
-              <p className="text-xs mt-2 text-gray-600">Free STT + Smart AI Routing + Premium TTS</p>
+              <p>Click Start, speak your question, then click Stop</p>
+              <p className="text-xs">Works on ALL browsers (Chrome, Firefox, Brave, Tor, etc.)</p>
+              <p className="text-xs mt-2 text-gray-600">Whisper STT + ElevenLabs TTS + n8n Intelligence</p>
             </div>
           )}
         </div>
@@ -818,7 +749,7 @@ export default function VoiceModeUI() {
                         <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></span>
                         <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "0.4s" }}></span>
                       </div>
-                      <span className="text-sm font-medium">Thinking...</span>
+                      <span className="text-sm font-medium">Processing...</span>
                     </div>
                   </div>
                 </motion.div>
