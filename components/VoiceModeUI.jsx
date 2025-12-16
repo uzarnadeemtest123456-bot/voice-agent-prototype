@@ -26,11 +26,22 @@ export default function VoiceModeUI() {
   const isSpeakingRef = useRef(false);
   const statusRef = useRef("idle");
   const streamRef = useRef(null);
+  const analyserRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const silenceStartRef = useRef(null);
+  const volumeCheckIntervalRef = useRef(null);
+  const hasSpeechDetectedRef = useRef(false);
+  const messagesRef = useRef([]);
 
   // Sync status to ref
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  // Sync messages to ref
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Initialize audio player
   useEffect(() => {
@@ -126,8 +137,11 @@ export default function VoiceModeUI() {
         }
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(100); // Collect data every 100ms
       console.log("Recording started (cross-browser support)");
+
+      // Setup Voice Activity Detection (VAD)
+      setupVoiceActivityDetection(stream);
 
     } catch (err) {
       console.error("Error accessing microphone:", err);
@@ -136,7 +150,86 @@ export default function VoiceModeUI() {
     }
   }
 
+  function setupVoiceActivityDetection(stream) {
+    // Create AudioContext for volume analysis
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    audioContextRef.current = audioContext;
+
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    analyserRef.current = analyser;
+
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    // Reset speech detection flag
+    hasSpeechDetectedRef.current = false;
+
+    // Check volume every 100ms
+    volumeCheckIntervalRef.current = setInterval(() => {
+      if (statusRef.current !== "listening") {
+        return; // Only check when listening
+      }
+
+      analyser.getByteTimeDomainData(dataArray);
+
+      // Calculate average volume
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const normalized = (dataArray[i] - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / bufferLength);
+      const volume = rms;
+
+      const SILENCE_THRESHOLD = 0.01; // Adjust based on environment
+      const SPEECH_THRESHOLD = 0.03; // Volume level to consider as speech
+
+      // Detect if user is actually speaking (above speech threshold)
+      if (volume > SPEECH_THRESHOLD) {
+        hasSpeechDetectedRef.current = true;
+      }
+
+      if (volume < SILENCE_THRESHOLD) {
+        if (!silenceStartRef.current) {
+          silenceStartRef.current = Date.now();
+        }
+
+        const silenceDuration = Date.now() - silenceStartRef.current;
+
+        // Auto-stop after 1.5 seconds of silence, but ONLY if speech was detected
+        if (silenceDuration > 1500 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
+          console.log("Speech detected and silence for 1.5s, auto-processing...");
+          clearInterval(volumeCheckIntervalRef.current);
+          stopListening();
+        }
+      } else {
+        silenceStartRef.current = null;
+      }
+    }, 100);
+  }
+
+  function cleanupVoiceActivityDetection() {
+    if (volumeCheckIntervalRef.current) {
+      clearInterval(volumeCheckIntervalRef.current);
+      volumeCheckIntervalRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    silenceStartRef.current = null;
+    analyserRef.current = null;
+  }
+
   function stopListening() {
+    cleanupVoiceActivityDetection();
+    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
     }
@@ -184,8 +277,12 @@ export default function VoiceModeUI() {
 
       if (transcript.length > 0) {
         setUserTranscript(transcript);
-        setMessages((prev) => [...prev, { role: "user", text: transcript }]);
-        await handleUserQuery(transcript);
+        // Use messagesRef to get the latest messages (avoid stale closure)
+        const currentMessages = messagesRef.current;
+        const newMessages = [...currentMessages, { role: "user", text: transcript }];
+        setMessages(newMessages);
+        messagesRef.current = newMessages; // Update ref immediately
+        await handleUserQuery(transcript, newMessages);
       } else {
         setStatus("listening");
         await startListening();
@@ -210,7 +307,7 @@ export default function VoiceModeUI() {
       setStatus("listening");
       setMessages([]);
       setCurrentAssistantText("");
-      setUserTranscript("Press Stop when you finish speaking...");
+      setUserTranscript("Listening... Just speak naturally!");
 
       await startListening();
 
@@ -221,36 +318,16 @@ export default function VoiceModeUI() {
     }
   }
 
-  async function handleUserQuery(query) {
+  async function handleUserQuery(query, currentMessages) {
     setStatus("thinking");
     setCurrentAssistantText("");
     assistantTextBufferRef.current = "";
     spokenUpToIndexRef.current = 0;
 
     try {
-      // Step 1: Rephrase/clean the query using OpenAI
-      const rephraseResponse = await fetch('/api/rephrase', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query }),
-      });
-
-      if (!rephraseResponse.ok) {
-        throw new Error('Query rephrasing failed');
-      }
-
-      const rephraseData = await rephraseResponse.json();
-      const cleanedQuery = rephraseData.rephrased;
-      
-      console.log('Rephrased query:', {
-        original: query,
-        cleaned: cleanedQuery
-      });
-
-      // Step 2: Send cleaned query directly to n8n
-      await callBrainWebhook(cleanedQuery);
+      // Send query directly to n8n (Whisper handles transcription accurately)
+      console.log('Sending query to n8n:', query);
+      await callBrainWebhook(query, currentMessages);
 
     } catch (err) {
       console.error("Error handling query:", err);
@@ -265,7 +342,7 @@ export default function VoiceModeUI() {
     }
   }
 
-  async function callBrainWebhook(userText) {
+  async function callBrainWebhook(userText, currentMessages) {
     setStatus("thinking");
 
     try {
@@ -277,6 +354,14 @@ export default function VoiceModeUI() {
 
       abortControllerRef.current = new AbortController();
 
+      // Prepare conversation memory for n8n (last 10 messages from currentMessages)
+      const messageContext = currentMessages.slice(-10).map(msg => ({
+        role: msg.role,
+        content: msg.text
+      }));
+
+      console.log('Sending message_context to n8n:', messageContext);
+
       const response = await fetch(webhookUrl, {
         method: "POST",
         headers: {
@@ -284,6 +369,7 @@ export default function VoiceModeUI() {
         },
         body: JSON.stringify({
           query: userText,
+          message_context: messageContext, // Conversation memory
           knowledge_model: 23,
           country: "CA"
         }),
@@ -431,6 +517,9 @@ export default function VoiceModeUI() {
     setUserTranscript("");
     setVolume(0);
     
+    // Wait 500ms before restarting listening to avoid picking up echo/speaker output
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
     // Auto-restart listening for next turn
     setStatus("listening");
     
@@ -473,51 +562,57 @@ export default function VoiceModeUI() {
     const remaining = text.substring(startIndex);
     if (remaining.length === 0) return null;
 
-    // For first segment, start speaking quickly
+    // For first segment, start speaking quickly with reasonable amount
     const isFirstSegment = spokenUpToIndexRef.current === 1;
     
-    if (isFirstSegment && remaining.length >= 10) {
+    if (isFirstSegment && remaining.length >= 20) {
       const firstSentenceEnd = remaining.search(/[.!?]\s/);
-      if (firstSentenceEnd !== -1 && firstSentenceEnd <= 60) {
+      if (firstSentenceEnd !== -1 && firstSentenceEnd >= 15 && firstSentenceEnd <= 80) {
         return remaining.substring(0, firstSentenceEnd + 1).trim();
       }
       
       const firstPause = remaining.search(/[,;:]\s/);
-      if (firstPause !== -1 && firstPause >= 10 && firstPause <= 50) {
+      if (firstPause !== -1 && firstPause >= 15 && firstPause <= 60) {
         return remaining.substring(0, firstPause + 1).trim();
       }
       
-      if (remaining.length >= 15) {
-        const chunk = remaining.substring(0, 20);
+      // Minimum 20 characters for first segment
+      if (remaining.length >= 25) {
+        const chunk = remaining.substring(0, 40);
         const lastSpace = chunk.lastIndexOf(" ");
-        if (lastSpace > 8) {
+        if (lastSpace > 15) {
           return chunk.substring(0, lastSpace).trim();
         }
       }
     }
 
-    // Split by sentence
+    // Split by sentence (prefer complete sentences)
     const sentenceEnd = remaining.search(/[.!?]\s/);
-    if (sentenceEnd !== -1) {
+    if (sentenceEnd !== -1 && sentenceEnd >= 15) {
       return remaining.substring(0, sentenceEnd + 1).trim();
     }
 
-    // Split by comma
+    // Split by comma (only if sufficient length)
     const pauseEnd = remaining.search(/[,;:]\s/);
-    if (pauseEnd !== -1 && pauseEnd >= 20) {
+    if (pauseEnd !== -1 && pauseEnd >= 25) {
       return remaining.substring(0, pauseEnd + 1).trim();
     }
 
-    // Word boundaries
-    if (remaining.length >= 35) {
+    // Word boundaries - get chunks for smooth TTS
+    if (remaining.length >= 30) {
       const chunk = remaining.substring(0, 50);
       const lastSpace = chunk.lastIndexOf(" ");
       if (lastSpace > 20) {
         return chunk.substring(0, lastSpace).trim();
       }
-      if (remaining.length >= 35) {
-        return remaining.substring(0, 35).trim();
+      if (remaining.length >= 30) {
+        return remaining.substring(0, 30).trim();
       }
+    }
+
+    // For very end, return whatever is left if it's at least 10 chars
+    if (remaining.length >= 10) {
+      return remaining.trim();
     }
 
     return null;
@@ -525,6 +620,7 @@ export default function VoiceModeUI() {
 
   function cleanup() {
     stopListening();
+    cleanupVoiceActivityDetection();
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -532,7 +628,7 @@ export default function VoiceModeUI() {
     }
 
     if (audioPlayerRef.current) {
-      audioPlayerRef.current.stop();
+      audioPlayerRef.current.cleanup();
     }
 
     spokenUpToIndexRef.current = 0;
@@ -560,7 +656,7 @@ export default function VoiceModeUI() {
       case "idle":
         return "Click Start to begin your conversation";
       case "listening":
-        return "Recording... Click Stop when you finish speaking";
+        return "Listening... (Auto-detects speech + 1.5s silence)";
       case "thinking":
         return "Processing...";
       case "speaking":
@@ -583,7 +679,7 @@ export default function VoiceModeUI() {
           <div className="text-center space-y-2">
             <h1 className="text-4xl font-bold text-white">Voice Mode</h1>
             <p className="text-gray-400">{getStatusText()}</p>
-            <p className="text-xs text-gray-500">Universal: Whisper STT + OpenAI Cleanup + n8n + ElevenLabs TTS</p>
+            <p className="text-xs text-gray-500">Universal: Whisper STT + n8n + ElevenLabs TTS</p>
           </div>
 
           {/* Error Display */}
@@ -632,7 +728,7 @@ export default function VoiceModeUI() {
 
           {/* Control Buttons */}
           <div className="flex gap-4 justify-center">
-            {!isActive ? (
+            {!isActive && (
               <button
                 onClick={startVoiceMode}
                 disabled={status === "error"}
@@ -642,14 +738,7 @@ export default function VoiceModeUI() {
                     : "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-lg hover:shadow-purple-500/50"
                 }`}
               >
-                Start
-              </button>
-            ) : (
-              <button
-                onClick={handleStop}
-                className="px-8 py-4 rounded-full font-semibold text-white bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 transition-all transform hover:scale-105 shadow-lg hover:shadow-red-500/50"
-              >
-                {status === "listening" ? "Stop Speaking" : "Stop"}
+                Start Conversation
               </button>
             )}
           </div>
@@ -672,9 +761,10 @@ export default function VoiceModeUI() {
 
           {/* Instructions */}
           {status === "idle" && (
-            <div className="text-center text-sm text-gray-500 space-y-1">
-              <p>Click Start, speak your question, then click Stop</p>
-              <p className="text-xs">Works on ALL browsers (Chrome, Firefox, Brave, Tor, etc.)</p>
+            <div className="text-center text-sm text-gray-500 space-y-2">
+              <p className="text-base font-semibold text-gray-300">Click Start and speak naturally!</p>
+              <p className="text-sm text-green-400">✓ Auto-detects when you stop speaking (1s silence)</p>
+              <p className="text-xs text-gray-400">No need to press any button - just stop talking!</p>
               <p className="text-xs mt-2 text-gray-600">Whisper STT + ElevenLabs TTS + n8n Intelligence</p>
             </div>
           )}

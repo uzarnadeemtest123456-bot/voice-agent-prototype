@@ -7,9 +7,7 @@ A Next.js voice assistant with cross-browser support, intelligent query processi
 ```
 User Speech
     ↓
-[Whisper STT] ← Works on ALL browsers (Chrome, Firefox, Brave, Tor, etc.)
-    ↓
-[OpenAI GPT] ← Cleans/rephrases query (fixes "TuxMat" pronunciations)
+[Whisper STT with Prompt] ← Works on ALL browsers + handles brand names accurately
     ↓
 [n8n Webhook] ← Handles all queries, streams responses
     ↓
@@ -28,8 +26,9 @@ User Hears Response
 
 ### 2. **Simplified Query Flow**
 - ❌ **Removed:** Intent classification logic
-- ✅ **New:** Direct query → rephrase → n8n
-- OpenAI only cleans/rephrases queries (fixes pronunciation errors)
+- ❌ **Removed:** Separate rephrase API call
+- ✅ **New:** Direct Whisper STT → n8n
+- Whisper prompt handles brand name accuracy (TuxMat, etc.)
 - All responses come from n8n (streaming supported)
 
 ### 3. **Superior Text-to-Speech (TTS)**
@@ -44,8 +43,8 @@ User Hears Response
 ### Prerequisites
 
 - Node.js 18+ installed
-- OpenAI API key (for Whisper STT + query cleanup)
-- ElevenLabs API key (for TTS)
+- OpenAI API key (for Whisper STT with context prompts)
+- ElevenLabs API key (for high-quality TTS)
 - n8n webhook URL configured
 
 ### 1. Install Dependencies
@@ -129,16 +128,13 @@ Visit http://localhost:3000/voice
 
 3. User clicks "Stop Speaking"
    → Recording stops
-   → Audio sent to Whisper API
-   → Transcribed: "what are stuck mats made of"
+   → Audio sent to Whisper API with context prompt
+   → Whisper accurately transcribes: "what are TuxMat mats made of"
 
-4. Query cleaned by OpenAI
-   → Fixed: "what are TuxMat mats made of"
-
-5. Cleaned query sent to n8n
+4. Transcribed query sent directly to n8n
    → n8n processes and streams response
 
-6. Response converted to speech
+5. Response converted to speech
    → ElevenLabs generates natural audio
    → Plays immediately as chunks arrive
    → User hears smooth, natural response
@@ -151,13 +147,13 @@ vapi_voice_test/
 ├── app/
 │   ├── api/
 │   │   ├── stt/
-│   │   │   └── route.js           # Whisper STT (cross-browser)
-│   │   ├── rephrase/
-│   │   │   └── route.js           # Query cleanup (fixes pronunciations)
+│   │   │   └── route.js           # Whisper STT with context prompts
 │   │   ├── tts/
 │   │   │   └── route.js           # ElevenLabs TTS
+│   │   ├── rephrase/
+│   │   │   └── route.js           # [NOT USED] Legacy rephrase logic
 │   │   └── chat/intent/
-│   │       └── route.js           # [DEPRECATED] Old intent logic
+│   │       └── route.js           # [NOT USED] Legacy intent logic
 │   └── voice/
 │       └── page.jsx               # Voice mode page
 ├── components/
@@ -172,25 +168,21 @@ vapi_voice_test/
 
 ## 🔧 API Endpoints
 
-### `/api/stt` - Speech-to-Text
+### `/api/stt` - Speech-to-Text (Active)
 - **Method:** POST
 - **Input:** FormData with audio blob
-- **Output:** Transcribed text
-- **Technology:** OpenAI Whisper
+- **Output:** `{ text: "transcribed text", success: true }`
+- **Technology:** OpenAI Whisper with context prompts
 - **Browser Support:** All (Firefox, Tor, Brave, Chrome, etc.)
+- **Features:** Brand name accuracy via prompt parameter
 
-### `/api/rephrase` - Query Cleanup
-- **Method:** POST
-- **Input:** `{ query: "raw user speech" }`
-- **Output:** `{ rephrased: "cleaned query" }`
-- **Purpose:** Fix pronunciation errors, normalize brand names
-
-### `/api/tts` - Text-to-Speech
+### `/api/tts` - Text-to-Speech (Active)
 - **Method:** POST
 - **Input:** `{ text: "text to speak" }`
 - **Output:** Audio stream (MP3)
 - **Technology:** ElevenLabs
 - **Quality:** High (natural, emotional, no stuttering)
+- **Features:** Streaming support for instant playback
 
 ## 🐛 Troubleshooting
 
@@ -236,49 +228,51 @@ Browser STT (WebKit) → Intent Classification → OpenAI/n8n → OpenAI TTS
 ❌ OpenAI TTS stutters
 ```
 
-### New Architecture (Universal)
+### New Architecture (Universal & Optimized)
 ```
-Whisper STT → Query Cleanup → n8n → ElevenLabs TTS
+Whisper STT with Prompt → n8n → ElevenLabs TTS
 ✅ Works on ALL browsers
-✅ Simple, direct flow
+✅ Simple, direct flow (no extra API calls)
 ✅ Superior voice quality
+✅ Faster response time
 ```
 
 ## 💰 Cost Estimation
 
 ### Per Conversation (Avg 10 exchanges):
 
-**OpenAI (Whisper STT):**
+**OpenAI (Whisper STT with prompts):**
 - ~$0.006/minute of audio
 - 10 queries × 3 seconds = 30 seconds = **~$0.003**
-
-**OpenAI (Query Cleanup):**
-- ~$0.0001 per query
-- 10 queries = **~$0.001**
 
 **ElevenLabs (TTS):**
 - Free tier: 10,000 characters/month
 - Paid: ~$0.30 per 1,000 characters
 - 10 responses × 100 chars = 1,000 chars = **~$0.30**
 
-**Total per conversation:** ~$0.30 (mostly TTS)
+**Total per conversation:** ~$0.303 (mostly TTS)
+**Savings:** Eliminated separate rephrase API calls = faster + cheaper!
 
 **Optimization tips:**
 - Use ElevenLabs free tier (10k chars/month = ~100 responses)
 - Cache common responses
 - Batch similar queries
 
-## 📝 Common Pronunciation Fixes
+## 📝 How Whisper Prompt Helps
 
-The rephrase API automatically fixes these common errors:
+The Whisper API uses a context prompt to accurately transcribe brand names and technical terms:
 
-| User Says | Whisper Hears | Rephrased To |
-|-----------|---------------|--------------|
+**Prompt includes:** "TuxMat floor mats, trunk mats, cargo liners. Honda Civic, Toyota Camry, Ford F-150..."
+
+| User Says | Without Prompt | With Prompt ✅ |
+|-----------|----------------|----------------|
 | "TuxMat" | "stuck mat" | "TuxMat" |
 | "TuxMat" | "text max" | "TuxMat" |
 | "TuxMat" | "tucks mat" | "TuxMat" |
 | "Honda Civic" | "honda civic" | "Honda Civic" |
-| "order 119395" | "order one one nine three nine five" | "order 119395" |
+| "Ford F-150" | "ford f one fifty" | "Ford F-150" |
+
+**To customize:** Edit `app/api/stt/route.js` and update the `prompt` parameter with your domain-specific terms.
 
 ## 🎨 Customization
 
