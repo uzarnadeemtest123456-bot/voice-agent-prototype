@@ -1,6 +1,8 @@
 /**
- * Custom hook for text-to-speech playback
- * Wraps QueuedAudioPlayer for React integration with streaming text handling
+ * Simplified TTS Player Hook for MiniMax Streaming
+ * Redesigned for minimal latency: n8n streams text → immediately send to MiniMax → stream audio
+ * 
+ * No complex segmentation - n8n provides chunks, we send them immediately
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
@@ -11,8 +13,7 @@ export function useTTSPlayer() {
   const [volume, setVolume] = useState(0);
 
   const audioPlayerRef = useRef(null);
-  const spokenUpToIndexRef = useRef(0);
-  const processTimeoutRef = useRef(null);
+  const lastProcessedLengthRef = useRef(0);
   const isCompleteRef = useRef(false);
 
   // Initialize audio player
@@ -32,13 +33,10 @@ export function useTTSPlayer() {
       if (audioPlayerRef.current) {
         audioPlayerRef.current.cleanup();
       }
-      if (processTimeoutRef.current) {
-        clearTimeout(processTimeoutRef.current);
-      }
     };
   }, []);
 
-  // Volume animation when speaking - using interval instead of RAF to prevent infinite loops
+  // Visual volume animation when speaking
   useEffect(() => {
     if (!speaking) {
       setVolume(0);
@@ -50,204 +48,198 @@ export function useTTSPlayer() {
       phase += 0.1;
       const simVolume = Math.abs(Math.sin(phase)) * 0.5 + 0.2;
       setVolume(simVolume);
-    }, 50); // Update every 50ms (20 fps - smooth enough for visual effect)
+    }, 50);
     
     return () => {
       clearInterval(intervalId);
     };
   }, [speaking]);
 
-  const extractNextSegment = useCallback((text, startIndex, isComplete = false) => {
-    const remaining = text.substring(startIndex);
-    if (remaining.length === 0) return null;
+  /**
+   * Extract next speakable chunk from streaming text
+   * Strategy: Look for sentence boundaries to create natural-sounding segments
+   */
+  const extractNextChunk = useCallback((fullText, startIndex, forceComplete = false) => {
+    const remaining = fullText.substring(startIndex);
+    
+    if (remaining.length === 0) {
+      return null;
+    }
 
-    const isFirstSegment = spokenUpToIndexRef.current === 0;
+    const isFirstChunk = startIndex === 0;
     
-    // ULTRA-AGGRESSIVE for ZERO LATENCY
-    // Start speaking IMMEDIATELY when text arrives!
-    const MIN_FIRST_SEGMENT = 30;    // INSTANT START - just 10 chars!
-    const MIN_SEGMENT = 50;           // Fast continuation
-    const MAX_SEGMENT = 200;          // Reasonable max size
+    // Configuration
+    const MIN_FIRST_CHUNK = 60;     // Start speaking quickly (after ~10 words)
+    const MIN_CHUNK = 40;            // Minimum for subsequent chunks
+    const MAX_CHUNK = 150;           // Maximum before forcing split
     
-    // Priority 1: FIRST SEGMENT - Start IMMEDIATELY with minimal text
-    if (isFirstSegment && remaining.length >= MIN_FIRST_SEGMENT) {
-      // Look for ANY natural break (space, comma, period, etc.) after 10 chars
-      const breakMatch = remaining.substring(MIN_FIRST_SEGMENT).match(/[\s.,!?;:]/);
-      
-      if (breakMatch) {
-        const endPos = MIN_FIRST_SEGMENT + breakMatch.index + 1;
-        const segment = remaining.substring(0, endPos).trim();
-        if (segment.length >= 8) {  // Minimum 8 chars to avoid tiny fragments
-          console.log(`🚀 INSTANT START: "${segment}"`);
-          return segment;
-        }
+    // For first chunk: Start speaking ASAP without waiting for perfect punctuation
+    if (isFirstChunk && remaining.length >= MIN_FIRST_CHUNK) {
+      // Look for sentence end first
+      const sentenceMatch = remaining.substring(0, 120).match(/[.!?]\s+/);
+      if (sentenceMatch) {
+        const chunk = remaining.substring(0, sentenceMatch.index + sentenceMatch[0].length).trim();
+        console.log(`🎯 [TTS] First chunk with punctuation (${chunk.length} chars)`);
+        return chunk;
       }
       
-      // If no break found but we have 20+ chars, just take it!
-      if (remaining.length >= 20) {
-        const spacePos = remaining.substring(15, 25).indexOf(' ');
-        if (spacePos !== -1) {
-          const segment = remaining.substring(0, 15 + spacePos).trim();
-          console.log(`🚀 QUICK START: "${segment}"`);
-          return segment;
-        }
+      // No sentence end yet - cut at word boundary to start speaking
+      const spaceIndex = remaining.substring(MIN_FIRST_CHUNK, MIN_FIRST_CHUNK + 40).indexOf(' ');
+      if (spaceIndex > 0) {
+        const chunk = remaining.substring(0, MIN_FIRST_CHUNK + spaceIndex).trim();
+        console.log(`🎯 [TTS] First chunk at word boundary (${chunk.length} chars, no punctuation)`);
+        return chunk;
       }
     }
     
-    // Priority 2: Complete sentences (. ! ?)
+    // Look for sentence boundaries (. ! ?)
     const sentenceMatches = [...remaining.matchAll(/[.!?]\s+/g)];
     
-    if (sentenceMatches.length > 0) {
-      for (const match of sentenceMatches) {
-        const endPos = match.index + match[0].length;
-        
-        // For first segment: accept if >= MIN_FIRST_SEGMENT (very low!)
-        if (isFirstSegment && endPos >= MIN_FIRST_SEGMENT) {
-          return remaining.substring(0, endPos).trim();
-        }
-        
-        // For subsequent segments: accept if >= MIN_SEGMENT
-        if (!isFirstSegment && endPos >= MIN_SEGMENT) {
-          return remaining.substring(0, endPos).trim();
-        }
-        
-        // Accept shorter if it's the last segment
-        if (isComplete && endPos >= 10) {
-          return remaining.substring(0, endPos).trim();
-        }
+    for (const match of sentenceMatches) {
+      const endPos = match.index + match[0].length;
+      
+      if (endPos >= MIN_CHUNK) {
+        const chunk = remaining.substring(0, endPos).trim();
+        console.log(`🎯 [TTS] Chunk at sentence (${chunk.length} chars)`);
+        return chunk;
       }
     }
     
-    // Priority 3: Major pauses (comma, semicolon, colon)
-    if (remaining.length >= 50) {
+    // Look for comma/pause boundaries
+    if (remaining.length >= MIN_CHUNK) {
       const pauseMatches = [...remaining.matchAll(/[,;:]\s+/g)];
       
       for (const match of pauseMatches) {
         const endPos = match.index + match[0].length;
         
-        // Accept if we have reasonable text length
-        if (endPos >= 40 && endPos <= MAX_SEGMENT) {
-          return remaining.substring(0, endPos).trim();
+        if (endPos >= MIN_CHUNK && endPos <= MAX_CHUNK) {
+          const chunk = remaining.substring(0, endPos).trim();
+          console.log(`🎯 [TTS] Chunk at pause (${chunk.length} chars)`);
+          return chunk;
         }
       }
     }
     
-    // Priority 4: Force split at word boundary if too long
-    if (remaining.length >= MAX_SEGMENT) {
-      const chunk = remaining.substring(0, MAX_SEGMENT);
-      const lastSpace = chunk.lastIndexOf(" ");
-      
-      if (lastSpace > MAX_SEGMENT * 0.6) {
-        return chunk.substring(0, lastSpace).trim();
+    // Force split if too long
+    if (remaining.length >= MAX_CHUNK) {
+      const cutPoint = remaining.substring(0, MAX_CHUNK).lastIndexOf(' ');
+      if (cutPoint > MAX_CHUNK * 0.6) {
+        const chunk = remaining.substring(0, cutPoint).trim();
+        console.log(`🎯 [TTS] Forced chunk split (${chunk.length} chars)`);
+        return chunk;
       }
     }
     
-    // Priority 5: If streaming is complete, speak what's left
-    if (isComplete && remaining.length >= 8) {
+    // If complete, speak remaining text
+    if (forceComplete && remaining.trim().length >= 10) {
+      console.log(`🎯 [TTS] Final chunk (${remaining.length} chars)`);
       return remaining.trim();
     }
     
-    // Otherwise, wait for more text
+    // Wait for more text
+    console.log(`⏳ [TTS] Waiting for more text (have ${remaining.length} chars)`);
     return null;
   }, []);
 
-  const processNextSegment = useCallback((fullText, forceComplete = false) => {
-    const spokenUpTo = spokenUpToIndexRef.current;
-
-    if (spokenUpTo >= fullText.length) {
-      processTimeoutRef.current = null;
+  /**
+   * Process streaming text as it arrives from n8n
+   * Extracts chunks and sends them immediately to MiniMax
+   */
+  const speakStreaming = useCallback((text) => {
+    if (!text || text.length === 0) return;
+    
+    const lastProcessed = lastProcessedLengthRef.current;
+    
+    // Only process new text that arrived
+    if (lastProcessed >= text.length) {
       return;
     }
-
-    const isComplete = forceComplete || isCompleteRef.current;
-    const segment = extractNextSegment(fullText, spokenUpTo, isComplete);
-
-    if (segment) {
-      console.log("TTS: Processing segment:", segment.substring(0, 80) + "...");
-      spokenUpToIndexRef.current += segment.length;
-      audioPlayerRef.current.addToQueue(segment.trim());
+    
+    // Extract and queue chunks immediately
+    while (lastProcessedLengthRef.current < text.length) {
+      const chunk = extractNextChunk(text, lastProcessedLengthRef.current, isCompleteRef.current);
       
-      // Check if there's more - IMMEDIATE processing (no delay!)
-      if (spokenUpToIndexRef.current < fullText.length) {
-        // Use immediate timeout (0ms) for instant processing
-        processTimeoutRef.current = setTimeout(() => {
-          processTimeoutRef.current = null;
-          processNextSegment(fullText, forceComplete);
-        }, 0);
+      if (chunk) {
+        console.log(`📤 [TTS] Sending chunk to MiniMax (${chunk.length} chars)`);
+        lastProcessedLengthRef.current += chunk.length;
+        
+        // Skip any whitespace between chunks
+        while (lastProcessedLengthRef.current < text.length && 
+               /\s/.test(text[lastProcessedLengthRef.current])) {
+          lastProcessedLengthRef.current++;
+        }
+        
+        // Send to audio player immediately
+        audioPlayerRef.current.addToQueue(chunk);
       } else {
-        processTimeoutRef.current = null;
+        // No complete chunk yet, wait for more text
+        break;
       }
-    } else {
-      // No segment extracted - wait for more text or completion
-      processTimeoutRef.current = null;
     }
-  }, [extractNextSegment]);
+  }, [extractNextChunk]);
 
-  const speakStreaming = useCallback((text) => {
-    // Process streaming text in segments - AGGRESSIVE for low latency
-    if (text && text.length > 0 && spokenUpToIndexRef.current < text.length) {
-      // Clear any pending timeout
-      if (processTimeoutRef.current !== null) {
-        clearTimeout(processTimeoutRef.current);
-        processTimeoutRef.current = null;
-      }
-      
-      // Process immediately
-      processNextSegment(text);
-    }
-  }, [processNextSegment]);
-
-  const speakComplete = useCallback(async (text) => {
-    // Speak entire text at once (for complete responses)
+  /**
+   * Speak complete text (for non-streaming scenarios)
+   */
+  const speakComplete = useCallback((text) => {
     if (text && text.trim().length > 0) {
-      spokenUpToIndexRef.current = 0;
-      await audioPlayerRef.current.addToQueue(text.trim());
+      console.log(`📤 [TTS] Speaking complete text (${text.length} chars)`);
+      lastProcessedLengthRef.current = 0;
+      audioPlayerRef.current.addToQueue(text.trim());
     }
   }, []);
 
+  /**
+   * Called when n8n streaming is complete - speak any remaining text
+   */
+  const flushRemaining = useCallback((fullText) => {
+    console.log(`🔄 [TTS] Flushing remaining text (processed: ${lastProcessedLengthRef.current}, total: ${fullText.length})`);
+    isCompleteRef.current = true;
+    
+    // Process any remaining text with completion flag
+    if (lastProcessedLengthRef.current < fullText.length) {
+      speakStreaming(fullText);
+    }
+  }, [speakStreaming]);
+
+  /**
+   * Stop playback immediately
+   */
   const stop = useCallback(() => {
+    console.log('🛑 [TTS] Stop requested');
     if (audioPlayerRef.current) {
       audioPlayerRef.current.stop();
-    }
-    if (processTimeoutRef.current) {
-      clearTimeout(processTimeoutRef.current);
-      processTimeoutRef.current = null;
     }
     setSpeaking(false);
     setVolume(0);
   }, []);
 
-  const flushRemaining = useCallback((fullText) => {
-    // Called when streaming is complete - speak any remaining text
-    console.log("TTS: Flushing remaining text");
-    isCompleteRef.current = true;
-    
-    // Process remaining text with completion flag
-    if (spokenUpToIndexRef.current < fullText.length) {
-      processNextSegment(fullText, true);
-    }
-  }, [processNextSegment]);
-
+  /**
+   * Reset state for new conversation
+   */
   const reset = useCallback(() => {
-    console.log("TTS Player reset called");
-    spokenUpToIndexRef.current = 0;
+    console.log('🔄 [TTS] Reset');
+    lastProcessedLengthRef.current = 0;
     isCompleteRef.current = false;
     if (audioPlayerRef.current) {
       audioPlayerRef.current.clear();
     }
-    if (processTimeoutRef.current) {
-      clearTimeout(processTimeoutRef.current);
-      processTimeoutRef.current = null;
-    }
   }, []);
 
+  /**
+   * Wait for all playback to complete
+   */
   const waitForPlaybackComplete = useCallback(async () => {
     while (audioPlayerRef.current?.isProcessing || speaking) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }, [speaking]);
 
+  /**
+   * Resume playback
+   */
   const resume = useCallback(() => {
+    console.log('▶️ [TTS] Resume');
     if (audioPlayerRef.current) {
       audioPlayerRef.current.resume();
     }

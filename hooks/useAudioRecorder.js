@@ -181,7 +181,7 @@ export function useAudioRecorder() {
       // Improved thresholds for better speech detection
       const SILENCE_THRESHOLD = 0.006;  // Slightly higher to avoid background noise
       const SPEECH_THRESHOLD = 0.020;    // Reasonable threshold to detect actual speech
-      const MIN_SPEECH_DURATION = 250;  // Require at least 400ms of continuous speech
+      const MIN_SPEECH_DURATION = 250;  // Require at least 250ms of continuous speech
       
       // Track speech duration
       if (!window._speechStartTime) {
@@ -209,9 +209,10 @@ export function useAudioRecorder() {
 
         const silenceDuration = Date.now() - silenceStartRef.current;
 
-        // Auto-stop after 1.3 seconds of silence, but ONLY if speech was detected
-        if (silenceDuration > 1300 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
-          console.log("Speech detected and silence for 1.3s, auto-processing...");
+        // Auto-stop after 700ms of silence, but ONLY if speech was detected
+        // OPTIMIZATION: Reduced from 1300ms to 700ms for faster response (saves ~600ms!)
+        if (silenceDuration > 700 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
+          console.log("Speech detected and silence for 0.7s, auto-processing...");
           clearInterval(volumeCheckIntervalRef.current);
           window._speechStartTime = null;
           

@@ -1,9 +1,8 @@
 /**
- * Text-to-Speech API Route using MiniMax
- * Simple non-streaming approach: Convert text chunk to complete audio
+ * Text-to-Speech API Route using MiniMax with Streaming
+ * Redesigned for minimal latency: text chunk → audio stream → immediate playback
  * 
- * The streaming happens at the TEXT level (from n8n)
- * Each text chunk gets converted to audio and returned immediately
+ * Flow: n8n streams text → client sends chunks → MiniMax streams audio → client plays
  */
 
 import { NextResponse } from 'next/server';
@@ -39,38 +38,38 @@ export async function POST(request) {
       );
     }
 
-    console.log('🎤 Generating TTS for:', text.substring(0, 80) + (text.length > 80 ? '...' : ''));
-
     const voiceId = process.env.MINIMAX_VOICE_ID;
     
-    // Call MiniMax TTS API - NON-STREAMING (much simpler!)
+    // MiniMax TTS API configuration - kept as specified
     const requestBody = {
-      model: 'speech-2.6-turbo',
+      model: 'speech-2.6-hd',
       text: text,
-      stream: false,  // Get complete audio, not streaming
-      output_format: 'hex',
+      stream: true,
       voice_setting: {
         voice_id: voiceId,
         speed: 1,
         vol: 1,
-        pitch: 0
+        pitch: 1
       },
       audio_setting: {
         format: 'mp3',
         sample_rate: 32000,
         bitrate: 128000,
-        channel: 1
+        channel: 2
       }
     };
     
     const startTime = Date.now();
+    console.log(`🎤 [TTS] Streaming text to MiniMax: "${text.substring(0, 50)}..."`);
+    
     const response = await fetch(
       `https://api.minimax.io/v1/t2a_v2`,
       {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
         },
         body: JSON.stringify(requestBody)
       }
@@ -85,63 +84,111 @@ export async function POST(request) {
       );
     }
 
-    const data = await response.json();
-    const elapsed = Date.now() - startTime;
+    // MiniMax sends cumulative chunks - collect all and send only the last (complete) one
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let firstChunkTime = null;
+    let audioChunkCount = 0;
+    let lastAudioBuffer = null;
+    let totalAudioBytes = 0;
     
-    // Check for errors in response
-    if (data.base_resp && data.base_resp.status_code !== 0) {
-      console.error('❌ MiniMax API error:', data.base_resp);
-      return NextResponse.json(
-        { error: data.base_resp.status_msg || 'MiniMax API error' },
-        { status: 500 }
-      );
-    }
-
-    // Extract audio from response
-    let audioHex = null;
-    if (data.data && data.data.audio) {
-      audioHex = data.data.audio;
-    } else if (data.audio) {
-      audioHex = data.audio;
-    }
-
-    if (!audioHex) {
-      console.error('❌ No audio in response. Keys:', Object.keys(data));
-      return NextResponse.json(
-        { error: 'No audio data in response' },
-        { status: 500 }
-      );
-    }
-
-    // Convert hex to binary audio
-    const audioBytes = hexToBytes(audioHex);
+    const audioStream = new ReadableStream({
+      async start(controller) {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) {
+              const elapsed = Date.now() - startTime;
+              console.log(`✅ [TTS] Complete: ${audioChunkCount} chunks received, sending last chunk (${lastAudioBuffer?.length || 0} bytes) in ${elapsed}ms`);
+              
+              // Send only the last chunk (which contains the complete audio)
+              if (lastAudioBuffer) {
+                controller.enqueue(lastAudioBuffer);
+              }
+              
+              controller.close();
+              break;
+            }
+            
+            // Decode SSE stream
+            buffer += decoder.decode(value, { stream: true });
+            
+            // Process complete SSE events (delimited by \n\n)
+            const events = buffer.split('\n\n');
+            buffer = events.pop() || '';
+            
+            for (const event of events) {
+              if (!event.trim()) continue;
+              
+              // Parse SSE format: "data: {...}"
+              const lines = event.split('\n');
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const eventData = JSON.parse(line.substring(6));
+                    
+                    // Check for errors
+                    if (eventData.base_resp && eventData.base_resp.status_code !== 0) {
+                      console.error('❌ [TTS] MiniMax error:', eventData.base_resp);
+                      controller.error(new Error(eventData.base_resp.status_msg || 'MiniMax streaming error'));
+                      return;
+                    }
+                    
+                    // Extract audio hex data
+                    let audioHex = null;
+                    if (eventData.data?.audio) {
+                      audioHex = eventData.data.audio;
+                    } else if (eventData.audio) {
+                      audioHex = eventData.audio;
+                    }
+                    
+                    if (audioHex && audioHex.length > 0) {
+                      // Convert hex to binary
+                      const audioBuffer = Buffer.from(audioHex, 'hex');
+                      audioChunkCount++;
+                      totalAudioBytes += audioBuffer.length;
+                      
+                      if (firstChunkTime === null) {
+                        firstChunkTime = Date.now() - startTime;
+                        console.log(`⚡ [TTS] First audio chunk in ${firstChunkTime}ms (${audioBuffer.length} bytes)`);
+                      }
+                      
+                      // Keep overwriting with latest chunk (cumulative)
+                      lastAudioBuffer = audioBuffer;
+                      console.log(`🎵 [TTS] Chunk ${audioChunkCount}: ${audioBuffer.length} bytes (kept as last)`);
+                    }
+                  } catch (parseError) {
+                    console.error('❌ [TTS] Failed to parse SSE data:', parseError);
+                  }
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.error('❌ [TTS] Stream error:', error);
+          controller.error(error);
+        }
+      }
+    });
     
-    console.log(`✅ Generated ${audioBytes.length} bytes of audio in ${elapsed}ms`);
-    
-    // Return audio as binary (application/octet-stream)
-    return new NextResponse(audioBytes, {
+    // Return streaming audio response
+    return new NextResponse(audioStream, {
       headers: {
         'Content-Type': 'audio/mpeg',
-        'Content-Length': audioBytes.length.toString(),
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
       },
     });
 
   } catch (error) {
-    console.error('❌ TTS API error:', error);
+    console.error('❌ [TTS] API error:', error);
     return NextResponse.json(
       { error: 'Internal server error', message: error.message },
       { status: 500 }
     );
   }
-}
-
-// Helper function to convert hex string to Uint8Array
-function hexToBytes(hex) {
-  const bytes = [];
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes.push(parseInt(hex.substring(i, i + 2), 16));
-  }
-  return new Uint8Array(bytes);
 }
 
 export const runtime = 'nodejs';

@@ -6,6 +6,23 @@
 import { useState, useRef, useCallback } from 'react';
 import { SSEParser } from '@/lib/sse';
 
+/**
+ * Smart text merge helper - handles both cumulative and delta streaming
+ * Prevents text duplication when streaming service sends full text each time
+ */
+function mergeStreamText(prev, incoming) {
+  if (!incoming) return prev;
+
+  // CUMULATIVE: incoming contains full text so far
+  if (incoming.startsWith(prev)) return incoming;
+
+  // DUPLICATE: incoming already included (paranoid but useful)
+  if (prev.includes(incoming)) return prev;
+
+  // DELTA: incoming is only the new part
+  return prev + incoming;
+}
+
 export function useAssistantStream() {
   const [assistantText, setAssistantText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -31,7 +48,10 @@ export function useAssistantStream() {
         for (const event of events) {
           if (event.event === "delta" && event.data?.text) {
             const newText = event.data.text;
-            assistantTextBufferRef.current += newText;
+            assistantTextBufferRef.current = mergeStreamText(
+              assistantTextBufferRef.current,
+              newText
+            );
             setAssistantText(assistantTextBufferRef.current);
           } else if (event.event === "done") {
             setIsStreaming(false);
@@ -91,7 +111,10 @@ export function useAssistantStream() {
                 // Content is regular text
               }
               
-              assistantTextBufferRef.current += jsonObj.content;
+              assistantTextBufferRef.current = mergeStreamText(
+                assistantTextBufferRef.current,
+                jsonObj.content
+              );
               setAssistantText(assistantTextBufferRef.current);
             }
           } catch (parseError) {
@@ -104,7 +127,10 @@ export function useAssistantStream() {
         try {
           const jsonObj = JSON.parse(buffer);
           if (jsonObj.type === "item" && jsonObj.content) {
-            assistantTextBufferRef.current += jsonObj.content;
+            assistantTextBufferRef.current = mergeStreamText(
+              assistantTextBufferRef.current,
+              jsonObj.content
+            );
             setAssistantText(assistantTextBufferRef.current);
           }
         } catch (e) {

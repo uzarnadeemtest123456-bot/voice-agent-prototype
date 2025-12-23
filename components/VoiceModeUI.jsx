@@ -16,6 +16,8 @@ export default function VoiceModeUI() {
 
   const messagesEndRef = useRef(null);
   const messagesRef = useRef([]);
+  const lastProcessedTextLengthRef = useRef(0); // FIX: Track processed text to avoid redundancy
+  const streamFlushedRef = useRef(false); // FIX: Track if stream has been flushed to prevent post-flush processing
 
   // Custom hooks for modular functionality
   const audioRecorder = useAudioRecorder();
@@ -40,6 +42,13 @@ export default function VoiceModeUI() {
       setStatus("thinking");
     }
   }, [audioRecorder.status]);
+
+  // OPTIMIZATION: Switch to "speaking" status when first text arrives from n8n
+  useEffect(() => {
+    if (assistantStream.assistantText && assistantStream.assistantText.length > 0 && status === "thinking") {
+      setStatus("speaking");
+    }
+  }, [assistantStream.assistantText, status]);
 
   // Handle recorder volume for visualization
   useEffect(() => {
@@ -81,9 +90,29 @@ export default function VoiceModeUI() {
   }, [status]);
 
   // Process streaming text for TTS
+  // NOTE: We pass the full accumulated text to speakStreaming, but the internal
+  // spokenUpToIndexRef tracks what has already been spoken to avoid duplication.
+  // This allows the segmentation logic to see the full context when extracting segments.
   useEffect(() => {
-    if (status === "speaking" && assistantStream.assistantText) {
-      ttsPlayer.speakStreaming(assistantStream.assistantText);
+    if (status === "speaking" && assistantStream.assistantText && !streamFlushedRef.current) {
+      const currentLength = assistantStream.assistantText.length;
+      const lastProcessedLength = lastProcessedTextLengthRef.current;
+      
+      // Only process if there's new text AND we haven't flushed yet
+      if (currentLength > lastProcessedLength) {
+        console.log(`📝 [UI] New text arrived: ${currentLength - lastProcessedLength} chars (total: ${currentLength})`);
+        console.log("ASSISTANT TEXT >>>", JSON.stringify(assistantStream.assistantText.substring(0, 200)));
+        // Pass full text - internal index tracking prevents re-speaking
+        ttsPlayer.speakStreaming(assistantStream.assistantText);
+        lastProcessedTextLengthRef.current = currentLength;
+      }
+    } else if (streamFlushedRef.current && assistantStream.assistantText) {
+      const currentLength = assistantStream.assistantText.length;
+      const lastProcessedLength = lastProcessedTextLengthRef.current;
+      if (currentLength > lastProcessedLength) {
+        console.log(`🚫 [UI] Ignoring ${currentLength - lastProcessedLength} chars that arrived after flush (total: ${currentLength})`);
+        lastProcessedTextLengthRef.current = currentLength; // Update to prevent repeated logs
+      }
     }
   }, [assistantStream.assistantText, status, ttsPlayer]);
 
@@ -140,16 +169,21 @@ export default function VoiceModeUI() {
     }));
 
     try {
+      // FIX: Reset text tracking and flush flag for new conversation turn
+      lastProcessedTextLengthRef.current = 0;
+      streamFlushedRef.current = false;
+      
       // Reset TTS for new response
       ttsPlayer.reset();
       
-      // Change to speaking status before streaming starts
-      setStatus("speaking");
+      // OPTIMIZATION: Keep status as "thinking" until first text arrives
+      // This prevents premature TTS activation
       
       // Start streaming assistant response
       await assistantStream.startConversation(transcript, messageContext, async (finalText) => {
         // Called when streaming completes - flush any remaining text
         console.log("Assistant stream complete, flushing remaining text");
+        streamFlushedRef.current = true; // Mark as flushed to prevent further processing
         ttsPlayer.flushRemaining(finalText);
         await handleAssistantComplete(finalText);
       });
@@ -180,8 +214,9 @@ export default function VoiceModeUI() {
     assistantStream.reset();
     setDisplayVolume(0);
     
-    // Wait 500ms before restarting listening to avoid picking up echo
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // OPTIMIZATION: Reduced from 500ms to 150ms for faster turn-around (saves 350ms!)
+    // Short delay to avoid echo pickup while keeping response snappy
+    await new Promise(resolve => setTimeout(resolve, 150));
     
     // Auto-restart listening for next turn
     setStatus("listening");
@@ -210,7 +245,7 @@ export default function VoiceModeUI() {
       case "idle":
         return "Click Start to begin your conversation";
       case "listening":
-        return "Listening... (Auto-detects speech + 1.5s silence)";
+        return "Listening... (Auto-detects speech + 0.7s silence)";
       case "thinking":
         return "Processing...";
       case "speaking":
@@ -317,7 +352,7 @@ export default function VoiceModeUI() {
           {status === "idle" && (
             <div className="text-center text-sm text-gray-500 space-y-2">
               <p className="text-base font-semibold text-gray-300">Click Start and speak naturally!</p>
-              <p className="text-sm text-green-400">✓ Auto-detects when you stop speaking (1s silence)</p>
+              <p className="text-sm text-green-400">✓ Auto-detects when you stop speaking (0.7s silence)</p>
               <p className="text-xs text-gray-400">No need to press any button - just stop talking!</p>
               <p className="text-xs mt-2 text-gray-600">Whisper STT + MiniMax TTS + n8n Intelligence</p>
             </div>
