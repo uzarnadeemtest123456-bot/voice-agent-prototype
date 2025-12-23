@@ -2,76 +2,69 @@
 
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
-import { SSEParser } from "@/lib/sse";
 import { getBreathingScale } from "@/lib/audioLevel";
-import { QueuedAudioPlayer } from "@/lib/audioPlayer";
+import { useAudioRecorder } from "@/hooks/useAudioRecorder";
+import { useAssistantStream } from "@/hooks/useAssistantStream";
+import { useTTSPlayer } from "@/hooks/useTTSPlayer";
 
 export default function VoiceModeUI() {
-  // State management
+  // Main status state
   const [status, setStatus] = useState("idle"); // idle, listening, thinking, speaking, error
-  const [volume, setVolume] = useState(0);
-  const [error, setError] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [currentAssistantText, setCurrentAssistantText] = useState("");
-  const [userTranscript, setUserTranscript] = useState("");
+  const [displayVolume, setDisplayVolume] = useState(0);
+  const [displayError, setDisplayError] = useState(null);
 
-  // Refs
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const abortControllerRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const audioPlayerRef = useRef(null);
-  const spokenUpToIndexRef = useRef(0);
-  const assistantTextBufferRef = useRef("");
-  const isSpeakingRef = useRef(false);
-  const statusRef = useRef("idle");
-  const streamRef = useRef(null);
-  const analyserRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const silenceStartRef = useRef(null);
-  const volumeCheckIntervalRef = useRef(null);
-  const hasSpeechDetectedRef = useRef(false);
   const messagesRef = useRef([]);
 
-  // Sync status to ref
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
+  // Custom hooks for modular functionality
+  const audioRecorder = useAudioRecorder();
+  const assistantStream = useAssistantStream();
+  const ttsPlayer = useTTSPlayer();
 
   // Sync messages to ref
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
-  // Initialize audio player
-  useEffect(() => {
-    audioPlayerRef.current = new QueuedAudioPlayer();
-    
-    audioPlayerRef.current.onStart = () => {
-      isSpeakingRef.current = true;
-    };
-    
-    audioPlayerRef.current.onEnd = () => {
-      isSpeakingRef.current = false;
-      setVolume(0);
-    };
-
-    return () => {
-      cleanup();
-    };
-  }, []);
-
   // Auto-scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, currentAssistantText]);
+  }, [messages, assistantStream.assistantText]);
 
-  // Process TTS for streaming responses
+  // Handle audio recorder status changes
   useEffect(() => {
-    if (status === "speaking" && audioPlayerRef.current && spokenUpToIndexRef.current > 0) {
-      processNextTTSSegment();
+    if (audioRecorder.status === "listening") {
+      setStatus("listening");
+    } else if (audioRecorder.status === "transcribing") {
+      setStatus("thinking");
     }
-  }, [currentAssistantText, status]);
+  }, [audioRecorder.status]);
+
+  // Handle recorder volume for visualization
+  useEffect(() => {
+    if (audioRecorder.status === "listening") {
+      setDisplayVolume(audioRecorder.volume);
+    }
+  }, [audioRecorder.volume, audioRecorder.status]);
+
+  // Handle TTS volume for visualization
+  useEffect(() => {
+    if (ttsPlayer.speaking) {
+      setDisplayVolume(ttsPlayer.volume);
+    }
+  }, [ttsPlayer.volume, ttsPlayer.speaking]);
+
+  // Handle errors
+  useEffect(() => {
+    if (audioRecorder.error) {
+      setDisplayError(audioRecorder.error);
+      setStatus("error");
+    } else if (assistantStream.error) {
+      setDisplayError(assistantStream.error);
+      setStatus("error");
+    }
+  }, [audioRecorder.error, assistantStream.error]);
 
   // Breathing animation for idle state
   useEffect(() => {
@@ -79,7 +72,7 @@ export default function VoiceModeUI() {
       let animationId;
       const animate = () => {
         const scale = getBreathingScale(Date.now());
-        setVolume(scale - 1);
+        setDisplayVolume(scale - 1);
         animationId = requestAnimationFrame(animate);
       };
       animate();
@@ -87,569 +80,130 @@ export default function VoiceModeUI() {
     }
   }, [status]);
 
-  // Volume animation for speaking state
+  // Process streaming text for TTS
   useEffect(() => {
-    if (status === "speaking" && isSpeakingRef.current) {
-      let animationId;
-      let phase = 0;
-      const animate = () => {
-        phase += 0.1;
-        const simVolume = Math.abs(Math.sin(phase)) * 0.5 + 0.2;
-        setVolume(simVolume);
-        animationId = requestAnimationFrame(animate);
-      };
-      animate();
-      return () => cancelAnimationFrame(animationId);
+    if (status === "speaking" && assistantStream.assistantText) {
+      ttsPlayer.speakStreaming(assistantStream.assistantText);
     }
-  }, [status, isSpeakingRef.current]);
+  }, [assistantStream.assistantText, status, ttsPlayer]);
 
-  async function startListening() {
-    try {
-      // Request microphone access - works on ALL browsers
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true
-        } 
-      });
-      
-      streamRef.current = stream;
-      audioChunksRef.current = [];
-
-      // Create MediaRecorder - works on Firefox, Chrome, Brave, Tor, etc.
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
-      });
-      
-      mediaRecorderRef.current = mediaRecorder;
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        if (audioChunksRef.current.length > 0) {
-          await processRecording();
-        }
-      };
-
-      mediaRecorder.start(100); // Collect data every 100ms
-      console.log("Recording started (cross-browser support)");
-
-      // Setup Voice Activity Detection (VAD)
-      setupVoiceActivityDetection(stream);
-
-    } catch (err) {
-      console.error("Error accessing microphone:", err);
-      setError("Could not access microphone. Please grant permission.");
-      setStatus("error");
-    }
-  }
-
-  function setupVoiceActivityDetection(stream) {
-    // Create AudioContext for volume analysis
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    audioContextRef.current = audioContext;
-
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    analyserRef.current = analyser;
-
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
-
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    
-    // Reset speech detection flag
-    hasSpeechDetectedRef.current = false;
-
-    // Check volume every 100ms
-    volumeCheckIntervalRef.current = setInterval(() => {
-      if (statusRef.current !== "listening") {
-        return; // Only check when listening
+  // Handle transcript completion from audio recorder
+  useEffect(() => {
+    if (audioRecorder.status === "idle" && audioRecorder.transcript && audioRecorder.transcript !== "Listening... Just speak naturally!") {
+      // User has finished speaking and transcript is ready
+      const transcript = audioRecorder.transcript;
+      if (transcript.trim().length > 0 && !transcript.includes("Transcribing")) {
+        handleUserQuery(transcript);
       }
-
-      analyser.getByteTimeDomainData(dataArray);
-
-      // Calculate average volume
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const normalized = (dataArray[i] - 128) / 128;
-        sum += normalized * normalized;
-      }
-      const rms = Math.sqrt(sum / bufferLength);
-      const volume = rms;
-
-      const SILENCE_THRESHOLD = 0.01; // Adjust based on environment
-      const SPEECH_THRESHOLD = 0.03; // Volume level to consider as speech
-
-      // Detect if user is actually speaking (above speech threshold)
-      if (volume > SPEECH_THRESHOLD) {
-        hasSpeechDetectedRef.current = true;
-      }
-
-      if (volume < SILENCE_THRESHOLD) {
-        if (!silenceStartRef.current) {
-          silenceStartRef.current = Date.now();
-        }
-
-        const silenceDuration = Date.now() - silenceStartRef.current;
-
-        // Auto-stop after 1.5 seconds of silence, but ONLY if speech was detected
-        if (silenceDuration > 1500 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
-          console.log("Speech detected and silence for 1.5s, auto-processing...");
-          clearInterval(volumeCheckIntervalRef.current);
-          stopListening();
-        }
-      } else {
-        silenceStartRef.current = null;
-      }
-    }, 100);
-  }
-
-  function cleanupVoiceActivityDetection() {
-    if (volumeCheckIntervalRef.current) {
-      clearInterval(volumeCheckIntervalRef.current);
-      volumeCheckIntervalRef.current = null;
     }
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    silenceStartRef.current = null;
-    analyserRef.current = null;
-  }
-
-  function stopListening() {
-    cleanupVoiceActivityDetection();
-    
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
-    }
-    
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-  }
-
-  async function processRecording() {
-    const audioBlob = new Blob(audioChunksRef.current, { 
-      type: audioChunksRef.current[0]?.type || 'audio/webm' 
-    });
-    
-    // Must have at least some audio data
-    if (audioBlob.size < 1000) {
-      console.log("Recording too short, ignoring");
-      setStatus("listening");
-      await startListening(); // Restart listening
-      return;
-    }
-
-    setStatus("thinking");
-    setUserTranscript("Transcribing...");
-
-    try {
-      // Call Whisper API for transcription
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.webm');
-
-      const sttResponse = await fetch('/api/stt', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!sttResponse.ok) {
-        throw new Error('Transcription failed');
-      }
-
-      const sttData = await sttResponse.json();
-      const transcript = sttData.text.trim();
-      
-      console.log("Whisper transcript:", transcript);
-
-      if (transcript.length > 0) {
-        setUserTranscript(transcript);
-        // Use messagesRef to get the latest messages (avoid stale closure)
-        const currentMessages = messagesRef.current;
-        const newMessages = [...currentMessages, { role: "user", text: transcript }];
-        setMessages(newMessages);
-        messagesRef.current = newMessages; // Update ref immediately
-        await handleUserQuery(transcript, newMessages);
-      } else {
-        setStatus("listening");
-        await startListening();
-      }
-
-    } catch (err) {
-      console.error("Error processing recording:", err);
-      setError(`Error: ${err.message}`);
-      setStatus("error");
-      
-      setTimeout(() => {
-        setStatus("listening");
-        setError(null);
-        startListening();
-      }, 3000);
-    }
-  }
+  }, [audioRecorder.status, audioRecorder.transcript]);
 
   async function startVoiceMode() {
     try {
-      setError(null);
+      setDisplayError(null);
       setStatus("listening");
       setMessages([]);
-      setCurrentAssistantText("");
-      setUserTranscript("Listening... Just speak naturally!");
+      assistantStream.reset();
+      ttsPlayer.reset();
 
-      await startListening();
+      // Create a temporary audio context and play silence to unlock audio
+      // This ensures audio will play later (browsers require user interaction)
+      const tempContext = new (window.AudioContext || window.webkitAudioContext)();
+      const buffer = tempContext.createBuffer(1, 1, 22050);
+      const source = tempContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(tempContext.destination);
+      source.start();
+      console.log('🔓 Audio context unlocked via user interaction');
 
+      await audioRecorder.startRecording();
     } catch (err) {
       console.error("Error starting voice mode:", err);
-      setError(`Error: ${err.message}`);
+      setDisplayError(`Error: ${err.message}`);
       setStatus("error");
     }
   }
 
-  async function handleUserQuery(query, currentMessages) {
+  async function handleUserQuery(transcript) {
     setStatus("thinking");
-    setCurrentAssistantText("");
-    assistantTextBufferRef.current = "";
-    spokenUpToIndexRef.current = 0;
+    
+    // Add user message
+    const currentMessages = messagesRef.current;
+    const newMessages = [...currentMessages, { role: "user", text: transcript }];
+    setMessages(newMessages);
+    messagesRef.current = newMessages;
+
+    // Prepare conversation context
+    const messageContext = newMessages.slice(-10).map(msg => ({
+      role: msg.role,
+      content: msg.text
+    }));
 
     try {
-      // Send query directly to n8n (Whisper handles transcription accurately)
-      console.log('Sending query to n8n:', query);
-      await callBrainWebhook(query, currentMessages);
+      // Reset TTS for new response
+      ttsPlayer.reset();
+      
+      // Change to speaking status before streaming starts
+      setStatus("speaking");
+      
+      // Start streaming assistant response
+      await assistantStream.startConversation(transcript, messageContext, async (finalText) => {
+        // Called when streaming completes - flush any remaining text
+        console.log("Assistant stream complete, flushing remaining text");
+        ttsPlayer.flushRemaining(finalText);
+        await handleAssistantComplete(finalText);
+      });
 
     } catch (err) {
       console.error("Error handling query:", err);
-      setError(`Error: ${err.message}`);
+      setDisplayError(`Error: ${err.message}`);
       setStatus("error");
       
       setTimeout(() => {
         setStatus("listening");
-        setError(null);
-        startListening();
+        setDisplayError(null);
+        audioRecorder.startRecording();
       }, 3000);
     }
   }
 
-  async function callBrainWebhook(userText, currentMessages) {
-    setStatus("thinking");
-
-    try {
-      const webhookUrl = process.env.NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL;
-      
-      if (!webhookUrl) {
-        throw new Error("N8N_BRAIN_WEBHOOK_URL not configured");
-      }
-
-      abortControllerRef.current = new AbortController();
-
-      // Prepare conversation memory for n8n (last 10 messages from currentMessages)
-      const messageContext = currentMessages.slice(-10).map(msg => ({
-        role: msg.role,
-        content: msg.text
-      }));
-
-      console.log('Sending message_context to n8n:', messageContext);
-
-      const response = await fetch(webhookUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query: userText,
-          message_context: messageContext, // Conversation memory
-          knowledge_model: 23,
-          country: "CA"
-        }),
-        signal: abortControllerRef.current.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`n8n webhook failed: ${response.status}`);
-      }
-
-      const contentType = response.headers.get("content-type");
-      
-      if (contentType?.includes("text/event-stream")) {
-        await handleSSEStream(response);
-      } else {
-        await handleStreamingJSON(response);
-      }
-
-    } catch (err) {
-      if (err.name === "AbortError") {
-        console.log("n8n request aborted");
-        return;
-      }
-      throw err;
-    }
-  }
-
-  async function handleSSEStream(response) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    const parser = new SSEParser();
-
-    setStatus("speaking");
-    spokenUpToIndexRef.current = 1; // Enable streaming TTS
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const events = parser.parse(chunk);
-
-        for (const event of events) {
-          if (event.event === "delta" && event.data?.text) {
-            const newText = event.data.text;
-            assistantTextBufferRef.current += newText;
-            setCurrentAssistantText(assistantTextBufferRef.current);
-          } else if (event.event === "done") {
-            await finishAssistantResponse();
-            return;
-          } else if (event.event === "error") {
-            throw new Error(event.data?.message || "Stream error");
-          }
-        }
-      }
-
-      await finishAssistantResponse();
-
-    } catch (err) {
-      if (err.name === "AbortError") {
-        return;
-      }
-      throw err;
-    }
-  }
-
-  async function handleStreamingJSON(response) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    setStatus("speaking");
-    spokenUpToIndexRef.current = 1; // Enable streaming TTS
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        buffer += chunk;
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-
-          try {
-            const jsonObj = JSON.parse(line);
-            
-            if (jsonObj.type === "item" && jsonObj.content) {
-              try {
-                const contentObj = JSON.parse(jsonObj.content);
-                if (contentObj.output) {
-                  console.log("Skipping final wrapped output");
-                  continue;
-                }
-              } catch (e) {
-                // Content is regular text
-              }
-              
-              assistantTextBufferRef.current += jsonObj.content;
-              setCurrentAssistantText(assistantTextBufferRef.current);
-            }
-          } catch (parseError) {
-            console.error("Error parsing JSON line:", parseError);
-          }
-        }
-      }
-
-      if (buffer.trim()) {
-        try {
-          const jsonObj = JSON.parse(buffer);
-          if (jsonObj.type === "item" && jsonObj.content) {
-            assistantTextBufferRef.current += jsonObj.content;
-            setCurrentAssistantText(assistantTextBufferRef.current);
-          }
-        } catch (e) {
-          // Ignore
-        }
-      }
-
-      await finishAssistantResponse();
-
-    } catch (err) {
-      if (err.name === "AbortError") {
-        return;
-      }
-      throw err;
-    }
-  }
-
-  async function finishAssistantResponse() {
+  async function handleAssistantComplete(finalText) {
     // Wait for all TTS to complete
-    await waitForPlaybackComplete();
+    await ttsPlayer.waitForPlaybackComplete();
 
-    // Add final message
-    if (assistantTextBufferRef.current) {
-      setMessages((prev) => [...prev, { role: "assistant", text: assistantTextBufferRef.current }]);
+    // Add final assistant message
+    if (finalText) {
+      setMessages((prev) => [...prev, { role: "assistant", text: finalText }]);
     }
 
-    setCurrentAssistantText("");
-    setUserTranscript("");
-    setVolume(0);
+    // Reset for next turn
+    assistantStream.reset();
+    setDisplayVolume(0);
     
-    // Wait 500ms before restarting listening to avoid picking up echo/speaker output
+    // Wait 500ms before restarting listening to avoid picking up echo
     await new Promise(resolve => setTimeout(resolve, 500));
     
     // Auto-restart listening for next turn
     setStatus("listening");
+    ttsPlayer.resume();
+    await audioRecorder.startRecording();
     
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.resume();
-    }
-    
-    await startListening();
     console.log("Ready for next turn");
   }
 
-  async function waitForPlaybackComplete() {
-    while (audioPlayerRef.current.isProcessing || isSpeakingRef.current) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-
-  async function processNextTTSSegment() {
-    const fullText = assistantTextBufferRef.current;
-    const spokenUpTo = spokenUpToIndexRef.current;
-
-    if (spokenUpTo >= fullText.length) {
-      return;
-    }
-
-    const segment = extractNextSegment(fullText, spokenUpTo);
-
-    if (segment) {
-      spokenUpToIndexRef.current += segment.length;
-      await audioPlayerRef.current.addToQueue(segment.trim());
-      
-      // Check if there's more
-      if (spokenUpToIndexRef.current < assistantTextBufferRef.current.length) {
-        setTimeout(() => processNextTTSSegment(), 50);
-      }
-    }
-  }
-
-  function extractNextSegment(text, startIndex) {
-    const remaining = text.substring(startIndex);
-    if (remaining.length === 0) return null;
-
-    // For first segment, start speaking quickly with reasonable amount
-    const isFirstSegment = spokenUpToIndexRef.current === 1;
-    
-    if (isFirstSegment && remaining.length >= 20) {
-      const firstSentenceEnd = remaining.search(/[.!?]\s/);
-      if (firstSentenceEnd !== -1 && firstSentenceEnd >= 15 && firstSentenceEnd <= 80) {
-        return remaining.substring(0, firstSentenceEnd + 1).trim();
-      }
-      
-      const firstPause = remaining.search(/[,;:]\s/);
-      if (firstPause !== -1 && firstPause >= 15 && firstPause <= 60) {
-        return remaining.substring(0, firstPause + 1).trim();
-      }
-      
-      // Minimum 20 characters for first segment
-      if (remaining.length >= 25) {
-        const chunk = remaining.substring(0, 40);
-        const lastSpace = chunk.lastIndexOf(" ");
-        if (lastSpace > 15) {
-          return chunk.substring(0, lastSpace).trim();
-        }
-      }
-    }
-
-    // Split by sentence (prefer complete sentences)
-    const sentenceEnd = remaining.search(/[.!?]\s/);
-    if (sentenceEnd !== -1 && sentenceEnd >= 15) {
-      return remaining.substring(0, sentenceEnd + 1).trim();
-    }
-
-    // Split by comma (only if sufficient length)
-    const pauseEnd = remaining.search(/[,;:]\s/);
-    if (pauseEnd !== -1 && pauseEnd >= 25) {
-      return remaining.substring(0, pauseEnd + 1).trim();
-    }
-
-    // Word boundaries - get chunks for smooth TTS
-    if (remaining.length >= 30) {
-      const chunk = remaining.substring(0, 50);
-      const lastSpace = chunk.lastIndexOf(" ");
-      if (lastSpace > 20) {
-        return chunk.substring(0, lastSpace).trim();
-      }
-      if (remaining.length >= 30) {
-        return remaining.substring(0, 30).trim();
-      }
-    }
-
-    // For very end, return whatever is left if it's at least 10 chars
-    if (remaining.length >= 10) {
-      return remaining.trim();
-    }
-
-    return null;
-  }
-
   function cleanup() {
-    stopListening();
-    cleanupVoiceActivityDetection();
-
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.cleanup();
-    }
-
-    spokenUpToIndexRef.current = 0;
-    assistantTextBufferRef.current = "";
-    isSpeakingRef.current = false;
-    audioChunksRef.current = [];
+    audioRecorder.cleanup();
+    assistantStream.stopStreaming();
+    ttsPlayer.stop();
   }
 
-  async function handleStop() {
-    // If we're currently listening, stop recording and process what we have
-    if (status === "listening" && mediaRecorderRef.current) {
-      stopListening();
-      return;
-    }
-    
-    // Otherwise, fully stop the voice mode
-    setStatus("idle");
-    cleanup();
-  }
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+  }, []);
 
-  const circleScale = 1 + volume * 1.5;
+  const circleScale = 1 + displayVolume * 1.5;
 
   const getStatusText = () => {
     switch (status) {
@@ -679,13 +233,13 @@ export default function VoiceModeUI() {
           <div className="text-center space-y-2">
             <h1 className="text-4xl font-bold text-white">Voice Mode</h1>
             <p className="text-gray-400">{getStatusText()}</p>
-            <p className="text-xs text-gray-500">Universal: Whisper STT + n8n + ElevenLabs TTS</p>
+            <p className="text-xs text-gray-500">Universal: Whisper STT + n8n + MiniMax TTS</p>
           </div>
 
           {/* Error Display */}
-          {error && (
+          {displayError && (
             <div className="bg-red-500/20 border border-red-500 rounded-lg p-4 text-red-200 text-center max-w-md">
-              {error}
+              {displayError}
             </div>
           )}
 
@@ -705,8 +259,8 @@ export default function VoiceModeUI() {
               <div
                 className="w-64 h-64 rounded-full bg-gradient-to-r from-purple-500 via-pink-500 to-purple-500 opacity-80"
                 style={{
-                  filter: `blur(${volume * 20 + 5}px)`,
-                  boxShadow: `0 0 ${volume * 100 + 50}px rgba(168, 85, 247, 0.6)`,
+                  filter: `blur(${displayVolume * 20 + 5}px)`,
+                  boxShadow: `0 0 ${displayVolume * 100 + 50}px rgba(168, 85, 247, 0.6)`,
                 }}
               />
             </motion.div>
@@ -765,7 +319,7 @@ export default function VoiceModeUI() {
               <p className="text-base font-semibold text-gray-300">Click Start and speak naturally!</p>
               <p className="text-sm text-green-400">✓ Auto-detects when you stop speaking (1s silence)</p>
               <p className="text-xs text-gray-400">No need to press any button - just stop talking!</p>
-              <p className="text-xs mt-2 text-gray-600">Whisper STT + ElevenLabs TTS + n8n Intelligence</p>
+              <p className="text-xs mt-2 text-gray-600">Whisper STT + MiniMax TTS + n8n Intelligence</p>
             </div>
           )}
         </div>
@@ -775,7 +329,7 @@ export default function VoiceModeUI() {
           <div className="w-96 bg-gray-800/50 backdrop-blur rounded-2xl p-6 flex flex-col">
             <h3 className="text-lg font-semibold text-white mb-4">Conversation</h3>
             <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
-              {messages.length === 0 && !currentAssistantText && (
+              {messages.length === 0 && !assistantStream.assistantText && (
                 <div className="text-center text-gray-500 text-sm mt-8">
                   Your conversation will appear here...
                 </div>
@@ -806,7 +360,7 @@ export default function VoiceModeUI() {
                 </motion.div>
               ))}
 
-              {currentAssistantText && (
+              {assistantStream.assistantText && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -821,12 +375,12 @@ export default function VoiceModeUI() {
                         <span className="w-1 h-1 bg-blue-500 rounded-full animate-pulse" style={{ animationDelay: "0.4s" }}></span>
                       </div>
                     </div>
-                    <p className="text-sm leading-relaxed">{currentAssistantText}</p>
+                    <p className="text-sm leading-relaxed">{assistantStream.assistantText}</p>
                   </div>
                 </motion.div>
               )}
 
-              {status === "thinking" && !currentAssistantText && (
+              {status === "thinking" && !assistantStream.assistantText && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}

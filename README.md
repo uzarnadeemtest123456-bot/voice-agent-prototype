@@ -11,7 +11,7 @@ User Speech
     ↓
 [n8n Webhook] ← Handles all queries, streams responses
     ↓
-[ElevenLabs TTS] ← Natural, emotional speech (no stuttering)
+[MiniMax TTS] ← Custom voice cloning with streaming (low latency)
     ↓
 User Hears Response
 ```
@@ -33,10 +33,11 @@ User Hears Response
 
 ### 3. **Superior Text-to-Speech (TTS)**
 - ❌ **Removed:** OpenAI TTS (stuttering issues)
-- ✅ **New:** ElevenLabs TTS
-- Natural, emotional, human-like voices
-- Streaming support for instant playback
-- No stuttering or robotic sound
+- ❌ **Removed:** ElevenLabs TTS
+- ✅ **New:** MiniMax TTS with Custom Voice Cloning
+- High-fidelity speech-02-hd model
+- Streaming support for ultra-low latency
+- Custom voice profile (moss_audio) from your audio sample
 
 ## 🚀 Setup Instructions
 
@@ -44,7 +45,7 @@ User Hears Response
 
 - Node.js 18+ installed
 - OpenAI API key (for Whisper STT with context prompts)
-- ElevenLabs API key (for high-quality TTS)
+- MiniMax API key & Group ID (for high-quality TTS with voice cloning)
 - n8n webhook URL configured
 
 ### 1. Install Dependencies
@@ -62,18 +63,19 @@ Create/update `.env.local`:
 NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL=your_n8n_webhook_url_here
 
 # OpenAI API Configuration
-# Required for: Whisper STT (cross-browser), Query rephrasing/cleanup
+# Required for: Whisper STT (cross-browser)
 OPENAI_API_KEY=your_openai_api_key_here
 
-# ElevenLabs API Configuration
-# Required for: High-quality TTS (natural, emotional, no stuttering)
-# Get your API key from: https://elevenlabs.io/
-ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+# MiniMax API Configuration (Server-side only - SECURE)
+# Required for: High-quality TTS with custom voice cloning
+# Get your API key and Group ID from: https://platform.minimax.io/
+MINIMAX_API_KEY=your_minimax_api_key_here
+MINIMAX_GROUP_ID=your_minimax_group_id_here
 
-# ElevenLabs Voice Configuration (Optional)
-# Default: Rachel (21m00Tcm4TlvDq8ikWAM) - natural, warm, clear
-# Other options: Bella (EXAVITQu4vr4xnSDxMaL), Josh (TxGEqnHWrfWFTfGW9XjX)
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+# MiniMax Voice Configuration
+# Custom cloned voice ID (moss_audio profile)
+# This voice was created from your provided audio sample
+MINIMAX_VOICE_ID=moss_audio_10aac8df-bbf2-11f0-9c0e-b68b6d146e10
 ```
 
 ### 3. Get API Keys
@@ -83,23 +85,23 @@ ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
 2. Create a new API key
 3. Add it to `.env.local`
 
-#### ElevenLabs API Key
-1. Visit https://elevenlabs.io/
-2. Sign up for a free account (10,000 characters/month free tier)
-3. Go to Profile → API Keys
+#### MiniMax API Key & Group ID
+1. Visit https://platform.minimax.io/ (International version)
+2. Sign up for an account
+3. Go to API Keys section
 4. Generate a new API key
-5. Add it to `.env.local`
+5. Copy your Group ID from the console
+6. Add both to `.env.local`
 
-#### Choose ElevenLabs Voice (Optional)
-1. Visit https://elevenlabs.io/voice-library
-2. Browse and preview voices
-3. Find voice you like and copy its ID
-4. Update `ELEVENLABS_VOICE_ID` in `.env.local`
+**Note:** Make sure to use the international API endpoint (`api.minimaxi.chat`) as voice cloning is only supported there.
 
-**Popular voices:**
-- Rachel (21m00Tcm4TlvDq8ikWAM) - Natural, warm, clear [Default]
-- Bella (EXAVITQu4vr4xnSDxMaL) - Expressive, youthful
-- Josh (TxGEqnHWrfWFTfGW9XjX) - Deep, authoritative male voice
+#### Custom Voice ID (Optional)
+The default voice ID `moss_audio_10aac8df-bbf2-11f0-9c0e-b68b6d146e10` is already configured. This is a custom voice cloned from your audio sample. To create additional voices:
+1. Visit MiniMax Voice Console
+2. Upload your audio sample (at least 30 seconds recommended)
+3. Train the voice model
+4. Copy the generated Voice ID
+5. Update `MINIMAX_VOICE_ID` in `.env.local`
 
 ### 4. Run Development Server
 
@@ -135,9 +137,9 @@ Visit http://localhost:3000/voice
    → n8n processes and streams response
 
 5. Response converted to speech
-   → ElevenLabs generates natural audio
-   → Plays immediately as chunks arrive
-   → User hears smooth, natural response
+   → MiniMax generates natural audio with custom voice
+   → Streams audio chunks for instant playback
+   → User hears smooth, natural response with cloned voice
 ```
 
 ## 📁 Project Structure
@@ -149,7 +151,7 @@ vapi_voice_test/
 │   │   ├── stt/
 │   │   │   └── route.js           # Whisper STT with context prompts
 │   │   ├── tts/
-│   │   │   └── route.js           # ElevenLabs TTS
+│   │   │   └── route.js           # MiniMax TTS with streaming
 │   │   ├── rephrase/
 │   │   │   └── route.js           # [NOT USED] Legacy rephrase logic
 │   │   └── chat/intent/
@@ -180,19 +182,20 @@ vapi_voice_test/
 - **Method:** POST
 - **Input:** `{ text: "text to speak" }`
 - **Output:** Audio stream (MP3)
-- **Technology:** ElevenLabs
-- **Quality:** High (natural, emotional, no stuttering)
-- **Features:** Streaming support for instant playback
+- **Technology:** MiniMax with custom voice cloning
+- **Quality:** High-fidelity (speech-02-hd model)
+- **Features:** Streaming SSE support for ultra-low latency
 
 ## 🐛 Troubleshooting
 
-### ElevenLabs API Error
-**Problem:** "ELEVENLABS_API_KEY not configured"
+### MiniMax API Error
+**Problem:** "MINIMAX_API_KEY not configured" or "MINIMAX_GROUP_ID not configured"
 
 **Solution:**
-1. Get API key from https://elevenlabs.io/
-2. Add to `.env.local`
-3. Restart dev server
+1. Get API key and Group ID from https://platform.minimax.io/
+2. Add both to `.env.local`
+3. Ensure you're using the international endpoint
+4. Restart dev server
 
 ### Microphone Not Working
 **Problem:** "Could not access microphone"
@@ -230,11 +233,12 @@ Browser STT (WebKit) → Intent Classification → OpenAI/n8n → OpenAI TTS
 
 ### New Architecture (Universal & Optimized)
 ```
-Whisper STT with Prompt → n8n → ElevenLabs TTS
+Whisper STT with Prompt → n8n → MiniMax TTS (Custom Voice Cloning)
 ✅ Works on ALL browsers
 ✅ Simple, direct flow (no extra API calls)
-✅ Superior voice quality
-✅ Faster response time
+✅ Superior voice quality with custom voice
+✅ Faster response time with streaming
+✅ Voice consistency across all responses
 ```
 
 ## 💰 Cost Estimation
@@ -245,18 +249,15 @@ Whisper STT with Prompt → n8n → ElevenLabs TTS
 - ~$0.006/minute of audio
 - 10 queries × 3 seconds = 30 seconds = **~$0.003**
 
-**ElevenLabs (TTS):**
-- Free tier: 10,000 characters/month
-- Paid: ~$0.30 per 1,000 characters
-- 10 responses × 100 chars = 1,000 chars = **~$0.30**
-
-**Total per conversation:** ~$0.303 (mostly TTS)
-**Savings:** Eliminated separate rephrase API calls = faster + cheaper!
+**MiniMax (TTS with voice cloning):**
+- Pricing varies by plan (check https://platform.minimax.io/)
+- High-quality speech-02-hd model
+- 10 responses × 100 chars = 1,000 chars
 
 **Optimization tips:**
-- Use ElevenLabs free tier (10k chars/month = ~100 responses)
+- Use sentence-level chunking for faster perceived response
 - Cache common responses
-- Batch similar queries
+- Leverage streaming to minimize latency
 
 ## 📝 How Whisper Prompt Helps
 
@@ -280,20 +281,20 @@ The Whisper API uses a context prompt to accurately transcribe brand names and t
 
 Edit `.env.local`:
 ```bash
-ELEVENLABS_VOICE_ID=your_preferred_voice_id
+MINIMAX_VOICE_ID=your_custom_voice_id
 ```
 
-Browse voices: https://elevenlabs.io/voice-library
+Create custom voices in MiniMax Voice Console by uploading audio samples.
 
 ### Adjust TTS Settings
 
 Edit `app/api/tts/route.js`:
 ```javascript
-voice_settings: {
-  stability: 0.5,        // 0-1 (higher = more consistent)
-  similarity_boost: 0.75, // 0-1 (higher = more similar to original)
-  style: 0.0,            // 0-1 (higher = more expressive)
-  use_speaker_boost: true // Enhance voice clarity
+voice_setting: {
+  voice_id: 'moss_audio_10aac8df-bbf2-11f0-9c0e-b68b6d146e10',
+  speed: 1.0,      // 0.5-2.0 (speaking speed)
+  pitch: 1.0,      // 0.5-2.0 (voice pitch)
+  emotion: 'neutral' // Emotion: neutral, happy, sad, angry, etc.
 }
 ```
 
@@ -329,8 +330,9 @@ vercel
 Ensure these are set in your deployment platform:
 - `NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL`
 - `OPENAI_API_KEY`
-- `ELEVENLABS_API_KEY`
-- `ELEVENLABS_VOICE_ID` (optional)
+- `MINIMAX_API_KEY`
+- `MINIMAX_GROUP_ID`
+- `MINIMAX_VOICE_ID` (optional, uses default if not set)
 
 ## 📄 License
 
@@ -343,7 +345,8 @@ Contributions welcome! Please open an issue or submit a pull request.
 ## 🔗 Resources
 
 - [OpenAI Whisper API](https://platform.openai.com/docs/guides/speech-to-text)
-- [ElevenLabs Documentation](https://docs.elevenlabs.io/)
+- [MiniMax API Documentation](https://platform.minimax.io/docs)
+- [MiniMax TTS Guide](https://blog.williamchong.cloud/code/2025/06/21/handling-minimax-tts-api-basic-and-streaming.html)
 - [Next.js Documentation](https://nextjs.org/docs)
 - [n8n Webhooks](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/)
 
