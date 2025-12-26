@@ -12,7 +12,6 @@ export async function POST(request) {
     const apiKey = process.env.MINIMAX_API_KEY;
     
     if (!apiKey) {
-      console.error('❌ MINIMAX_API_KEY not found in environment variables');
       return NextResponse.json(
         { error: 'MINIMAX_API_KEY not configured. Get it from https://platform.minimax.io/' },
         { status: 500 }
@@ -51,9 +50,6 @@ export async function POST(request) {
       }
     };
     
-    const startTime = Date.now();
-    console.log(`🎤 [TTS] Streaming text to MiniMax: "${text.substring(0, 50)}..."`);
-    
     const response = await fetch(
       `https://api-uw.minimax.io/v1/t2a_v2`,
       {
@@ -69,7 +65,6 @@ export async function POST(request) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('❌ MiniMax API error:', response.status, errorText);
       return NextResponse.json(
         { error: `MiniMax API failed: ${response.status}`, details: errorText },
         { status: response.status }
@@ -80,9 +75,6 @@ export async function POST(request) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let firstChunkTime = null;
-    let audioChunkCount = 0;
-    let totalAudioBytes = 0;
     
     const audioStream = new ReadableStream({
       async start(controller) {
@@ -91,8 +83,6 @@ export async function POST(request) {
             const { done, value } = await reader.read();
             
             if (done) {
-              const elapsed = Date.now() - startTime;
-              console.log(`✅ [TTS] Stream complete: ${audioChunkCount} chunks, ${totalAudioBytes} bytes in ${elapsed}ms`);
               controller.close();
               break;
             }
@@ -116,7 +106,6 @@ export async function POST(request) {
                     
                     // Check for errors
                     if (eventData.base_resp && eventData.base_resp.status_code !== 0) {
-                      console.error('❌ [TTS] MiniMax error:', eventData.base_resp);
                       controller.error(new Error(eventData.base_resp.status_msg || 'MiniMax streaming error'));
                       return;
                     }
@@ -136,29 +125,18 @@ export async function POST(request) {
                     if (status === 1 && audioHex && audioHex.length > 0) {
                       // Convert hex to binary and immediately enqueue
                       const audioBuf = Buffer.from(audioHex, 'hex');
-                      audioChunkCount++;
-                      totalAudioBytes += audioBuf.length;
-                      
-                      if (firstChunkTime === null) {
-                        firstChunkTime = Date.now() - startTime;
-                        console.log(`⚡ [TTS] First audio chunk in ${firstChunkTime}ms (${audioBuf.length} bytes)`);
-                      }
                       
                       // Stream immediately - don't accumulate
                       controller.enqueue(audioBuf);
-                      console.log(`🎵 [TTS] Chunk ${audioChunkCount}: ${audioBuf.length} bytes → streamed to client`);
-                    } else if (status === 2) {
-                      console.log(`✅ [TTS] Received end marker (status: 2)`);
                     }
                   } catch (parseError) {
-                    console.error('❌ [TTS] Failed to parse SSE data:', parseError);
+                    // Skip malformed SSE data
                   }
                 }
               }
             }
           }
         } catch (error) {
-          console.error('❌ [TTS] Stream error:', error);
           controller.error(error);
         }
       }
@@ -174,7 +152,6 @@ export async function POST(request) {
     });
 
   } catch (error) {
-    console.error('❌ [TTS] API error:', error);
     return NextResponse.json(
       { error: 'Internal server error', message: error.message },
       { status: 500 }

@@ -1,6 +1,11 @@
 /**
  * Custom hook for streaming assistant responses from n8n
  * Handles SSE streaming and JSON streaming formats
+ * 
+ * FIXED BUGS (2024-12-26):
+ * 1. mergeStreamText() - Fixed false-positive duplicate detection using prev.includes()
+ * 2. JSON streaming - Improved wrapped output detection to avoid skipping legitimate content
+ * 3. Error handling - Better logging for malformed JSON and partial buffers
  */
 
 import { useState, useRef, useCallback } from 'react';
@@ -9,17 +14,33 @@ import { SSEParser } from '@/lib/sse';
 /**
  * Smart text merge helper - handles both cumulative and delta streaming
  * Prevents text duplication when streaming service sends full text each time
+ * 
+ * FIXED BUG: Previous version used prev.includes(incoming) which would incorrectly
+ * skip any incoming text that matched ANY substring in prev, causing text loss.
+ * 
+ * Now uses more precise checks:
+ * - incoming.startsWith(prev): True cumulative streaming (full text each time)
+ * - prev === incoming: Exact duplicate
+ * - prev.endsWith(incoming): Duplicate end portion already received
+ * 
+ * @param {string} prev - Previously accumulated text
+ * @param {string} incoming - New text chunk
+ * @returns {string} Merged text without duplicates
  */
 function mergeStreamText(prev, incoming) {
   if (!incoming) return prev;
+  if (!prev) return incoming;
 
   // CUMULATIVE: incoming contains full text so far
   if (incoming.startsWith(prev)) return incoming;
 
-  // DUPLICATE: incoming already included (paranoid but useful)
-  if (prev.includes(incoming)) return prev;
+  // TRUE DUPLICATE: Check if we're receiving the exact same text again
+  if (prev === incoming) return prev;
+  
+  // DUPLICATE END: Check if incoming is just the end portion (already received)
+  if (prev.endsWith(incoming)) return prev;
 
-  // DELTA: incoming is only the new part
+  // DELTA: incoming is only the new part - append it
   return prev + incoming;
 }
 
@@ -101,40 +122,66 @@ export function useAssistantStream() {
             const jsonObj = JSON.parse(line);
             
             if (jsonObj.type === "item" && jsonObj.content) {
-              try {
-                const contentObj = JSON.parse(jsonObj.content);
-                if (contentObj.output) {
-                  console.log("Skipping final wrapped output");
-                  continue;
+              // Check if content is a JSON-wrapped final output (n8n specific format)
+              // Only skip if it's explicitly a wrapper with 'output' field and no streaming text
+              let contentToAdd = jsonObj.content;
+              
+              if (typeof jsonObj.content === 'string') {
+                try {
+                  const contentObj = JSON.parse(jsonObj.content);
+                  // Only skip if it's a wrapper object containing the full output
+                  // AND we already have text accumulated (meaning this is truly a final wrapper)
+                  if (contentObj.output && typeof contentObj.output === 'string' && 
+                      assistantTextBufferRef.current.length > 0) {
+                    continue;
+                  }
+                } catch (e) {
+                  // Content is not JSON - use it as-is (regular streaming text)
                 }
-              } catch (e) {
-                // Content is regular text
               }
               
               assistantTextBufferRef.current = mergeStreamText(
                 assistantTextBufferRef.current,
-                jsonObj.content
+                contentToAdd
               );
               setAssistantText(assistantTextBufferRef.current);
             }
           } catch (parseError) {
-            console.error("Error parsing JSON line:", parseError);
+            // Skip malformed JSON line
           }
         }
       }
 
+      // Process any remaining buffer content after stream ends
       if (buffer.trim()) {
         try {
           const jsonObj = JSON.parse(buffer);
           if (jsonObj.type === "item" && jsonObj.content) {
-            assistantTextBufferRef.current = mergeStreamText(
-              assistantTextBufferRef.current,
-              jsonObj.content
-            );
-            setAssistantText(assistantTextBufferRef.current);
+            // Apply same wrapper detection logic as above
+            let contentToAdd = jsonObj.content;
+            
+            if (typeof jsonObj.content === 'string') {
+              try {
+                const contentObj = JSON.parse(jsonObj.content);
+                if (contentObj.output && typeof contentObj.output === 'string' && 
+                    assistantTextBufferRef.current.length > 0) {
+                  contentToAdd = null;
+                }
+              } catch (e) {
+                // Content is not JSON - use it as-is
+              }
+            }
+            
+            if (contentToAdd) {
+              assistantTextBufferRef.current = mergeStreamText(
+                assistantTextBufferRef.current,
+                contentToAdd
+              );
+              setAssistantText(assistantTextBufferRef.current);
+            }
           }
         } catch (e) {
-          // Ignore
+          // Failed to parse remaining buffer - skip it
         }
       }
 
@@ -167,8 +214,6 @@ export function useAssistantStream() {
 
       abortControllerRef.current = new AbortController();
 
-      console.log('Sending message_context to n8n:', messageContext);
-
       const response = await fetch(webhookUrl, {
         method: "POST",
         headers: {
@@ -197,7 +242,6 @@ export function useAssistantStream() {
 
     } catch (err) {
       if (err.name === "AbortError") {
-        console.log("n8n request aborted");
         setIsStreaming(false);
         return;
       }

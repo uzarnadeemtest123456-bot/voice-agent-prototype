@@ -89,7 +89,6 @@ export function useTTSPlayer() {
       const sentenceMatch = remaining.substring(0, 120).match(/[.!?]\s+/);
       if (sentenceMatch) {
         const chunk = remaining.substring(0, sentenceMatch.index + sentenceMatch[0].length).trim();
-        console.log(`🎯 [TTS] First chunk with punctuation (${chunk.length} chars)`);
         return chunk;
       }
       
@@ -97,7 +96,6 @@ export function useTTSPlayer() {
       const spaceIndex = remaining.substring(MIN_FIRST_CHUNK, MIN_FIRST_CHUNK + 40).indexOf(' ');
       if (spaceIndex > 0) {
         const chunk = remaining.substring(0, MIN_FIRST_CHUNK + spaceIndex).trim();
-        console.log(`🎯 [TTS] First chunk at word boundary (${chunk.length} chars, no punctuation)`);
         return chunk;
       }
     }
@@ -110,7 +108,6 @@ export function useTTSPlayer() {
       
       if (endPos >= MIN_CHUNK) {
         const chunk = remaining.substring(0, endPos).trim();
-        console.log(`🎯 [TTS] Chunk at sentence (${chunk.length} chars)`);
         return chunk;
       }
     }
@@ -124,7 +121,6 @@ export function useTTSPlayer() {
         
         if (endPos >= MIN_CHUNK && endPos <= MAX_CHUNK) {
           const chunk = remaining.substring(0, endPos).trim();
-          console.log(`🎯 [TTS] Chunk at pause (${chunk.length} chars)`);
           return chunk;
         }
       }
@@ -135,19 +131,16 @@ export function useTTSPlayer() {
       const cutPoint = remaining.substring(0, MAX_CHUNK).lastIndexOf(' ');
       if (cutPoint > MAX_CHUNK * 0.6) {
         const chunk = remaining.substring(0, cutPoint).trim();
-        console.log(`🎯 [TTS] Forced chunk split (${chunk.length} chars)`);
         return chunk;
       }
     }
     
     // If complete, speak remaining text
     if (forceComplete && remaining.trim().length >= 10) {
-      console.log(`🎯 [TTS] Final chunk (${remaining.length} chars)`);
       return remaining.trim();
     }
     
     // Wait for more text
-    console.log(`⏳ [TTS] Waiting for more text (have ${remaining.length} chars)`);
     return null;
   }, []);
 
@@ -170,7 +163,6 @@ export function useTTSPlayer() {
       const chunk = extractNextChunk(text, lastProcessedLengthRef.current, isCompleteRef.current);
       
       if (chunk) {
-        console.log(`📤 [TTS] Sending chunk to MiniMax (${chunk.length} chars)`);
         lastProcessedLengthRef.current += chunk.length;
         
         // Skip any whitespace between chunks
@@ -193,7 +185,6 @@ export function useTTSPlayer() {
    */
   const speakComplete = useCallback((text) => {
     if (text && text.trim().length > 0) {
-      console.log(`📤 [TTS] Speaking complete text (${text.length} chars)`);
       lastProcessedLengthRef.current = 0;
       audioPlayerRef.current.addToQueue(text.trim());
     }
@@ -203,7 +194,6 @@ export function useTTSPlayer() {
    * Called when n8n streaming is complete - speak any remaining text
    */
   const flushRemaining = useCallback((fullText) => {
-    console.log(`🔄 [TTS] Flushing remaining text (processed: ${lastProcessedLengthRef.current}, total: ${fullText.length})`);
     isCompleteRef.current = true;
     
     // Process any remaining text with completion flag
@@ -219,7 +209,6 @@ export function useTTSPlayer() {
         if (audioPlayerRef.current) {
           audioPlayerRef.current.allSegmentsFetched = true;
           audioPlayerRef.current.checkStreamComplete();
-          console.log('🏁 [TTS] Signaled audio player that all segments are complete');
         }
       }, 10);
     }
@@ -229,7 +218,6 @@ export function useTTSPlayer() {
    * Stop playback immediately
    */
   const stop = useCallback(() => {
-    console.log('🛑 [TTS] Stop requested');
     if (audioPlayerRef.current) {
       audioPlayerRef.current.stop();
     }
@@ -241,7 +229,6 @@ export function useTTSPlayer() {
    * Reset state for new conversation
    */
   const reset = useCallback(() => {
-    console.log('🔄 [TTS] Reset');
     lastProcessedLengthRef.current = 0;
     isCompleteRef.current = false;
     if (audioPlayerRef.current) {
@@ -262,7 +249,6 @@ export function useTTSPlayer() {
    * Resume playback
    */
   const resume = useCallback(() => {
-    console.log('▶️ [TTS] Resume');
     if (audioPlayerRef.current) {
       audioPlayerRef.current.resume();
     }

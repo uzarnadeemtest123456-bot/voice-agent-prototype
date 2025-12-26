@@ -44,11 +44,25 @@ export default function VoiceModeUI() {
   }, [audioRecorder.status]);
 
   // OPTIMIZATION: Switch to "speaking" status when first text arrives from n8n
+  // FIXED BUG (2024-12-26): Race condition between status update and text processing
+  // 
+  // Previous issue: Having 'status' in the dependency array caused the effect to fire
+  // whenever either assistantText OR status changed, potentially causing inconsistent
+  // behavior when rapid updates occurred.
+  // 
+  // Solution: Use a ref to track the current status, removing it from dependencies.
+  // This ensures the effect only fires when assistantText changes, while still having
+  // access to the latest status value.
+  const statusRef = useRef(status);
   useEffect(() => {
-    if (assistantStream.assistantText && assistantStream.assistantText.length > 0 && status === "thinking") {
+    statusRef.current = status;
+  }, [status]);
+
+  useEffect(() => {
+    if (assistantStream.assistantText && assistantStream.assistantText.length > 0 && statusRef.current === "thinking") {
       setStatus("speaking");
     }
-  }, [assistantStream.assistantText, status]);
+  }, [assistantStream.assistantText]);
 
   // Handle recorder volume for visualization
   useEffect(() => {
@@ -100,8 +114,6 @@ export default function VoiceModeUI() {
       
       // Only process if there's new text AND we haven't flushed yet
       if (currentLength > lastProcessedLength) {
-        console.log(`📝 [UI] New text arrived: ${currentLength - lastProcessedLength} chars (total: ${currentLength})`);
-        console.log("ASSISTANT TEXT >>>", JSON.stringify(assistantStream.assistantText.substring(0, 200)));
         // Pass full text - internal index tracking prevents re-speaking
         ttsPlayer.speakStreaming(assistantStream.assistantText);
         lastProcessedTextLengthRef.current = currentLength;
@@ -110,7 +122,6 @@ export default function VoiceModeUI() {
       const currentLength = assistantStream.assistantText.length;
       const lastProcessedLength = lastProcessedTextLengthRef.current;
       if (currentLength > lastProcessedLength) {
-        console.log(`🚫 [UI] Ignoring ${currentLength - lastProcessedLength} chars that arrived after flush (total: ${currentLength})`);
         lastProcessedTextLengthRef.current = currentLength; // Update to prevent repeated logs
       }
     }
@@ -143,11 +154,9 @@ export default function VoiceModeUI() {
       source.buffer = buffer;
       source.connect(tempContext.destination);
       source.start();
-      console.log('🔓 Audio context unlocked via user interaction');
 
       await audioRecorder.startRecording();
     } catch (err) {
-      console.error("Error starting voice mode:", err);
       setDisplayError(`Error: ${err.message}`);
       setStatus("error");
     }
@@ -182,14 +191,12 @@ export default function VoiceModeUI() {
       // Start streaming assistant response
       await assistantStream.startConversation(transcript, messageContext, async (finalText) => {
         // Called when streaming completes - flush any remaining text
-        console.log("Assistant stream complete, flushing remaining text");
         streamFlushedRef.current = true; // Mark as flushed to prevent further processing
         ttsPlayer.flushRemaining(finalText);
         await handleAssistantComplete(finalText);
       });
 
     } catch (err) {
-      console.error("Error handling query:", err);
       setDisplayError(`Error: ${err.message}`);
       setStatus("error");
       
@@ -222,8 +229,6 @@ export default function VoiceModeUI() {
     setStatus("listening");
     ttsPlayer.resume();
     await audioRecorder.startRecording();
-    
-    console.log("Ready for next turn");
   }
 
   function cleanup() {

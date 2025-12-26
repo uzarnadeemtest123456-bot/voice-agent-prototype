@@ -62,14 +62,12 @@ export function useAudioRecorder() {
     
     // Must have at least some audio data (increased threshold to reduce hallucinations)
     if (audioBlob.size < 5000) {
-      console.log("Recording too short, ignoring (size:", audioBlob.size, ")");
       setStatus("idle");
       return null;
     }
 
     // Only process if we detected actual speech
     if (!hasSpeechDetectedRef.current) {
-      console.log("No speech detected, ignoring recording");
       setStatus("idle");
       return null;
     }
@@ -93,8 +91,6 @@ export function useAudioRecorder() {
 
       const sttData = await sttResponse.json();
       const transcriptText = sttData.text.trim();
-      
-      console.log("Whisper transcript:", transcriptText);
 
       // Filter out common Whisper hallucinations
       const hallucinations = [
@@ -122,13 +118,11 @@ export function useAudioRecorder() {
         setStatus("idle");
         return transcriptText;
       } else {
-        console.log("Transcript too short or appears to be hallucination, ignoring");
         setStatus("idle");
         return null;
       }
 
     } catch (err) {
-      console.error("Error processing recording:", err);
       setError(`Error: ${err.message}`);
       setStatus("error");
       
@@ -212,7 +206,6 @@ export function useAudioRecorder() {
         // Auto-stop after 700ms of silence, but ONLY if speech was detected
         // OPTIMIZATION: Reduced from 1300ms to 700ms for faster response (saves ~600ms!)
         if (silenceDuration > 700 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
-          console.log("Speech detected and silence for 0.7s, auto-processing...");
           clearInterval(volumeCheckIntervalRef.current);
           window._speechStartTime = null;
           
@@ -275,13 +268,11 @@ export function useAudioRecorder() {
       };
 
       mediaRecorder.start(100);
-      console.log("Recording started");
 
       // Setup Voice Activity Detection
       setupVoiceActivityDetection(stream);
 
     } catch (err) {
-      console.error("Error accessing microphone:", err);
       setError("Could not access microphone. Please grant permission.");
       setStatus("error");
     }

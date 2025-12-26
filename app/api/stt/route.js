@@ -43,15 +43,12 @@ export async function POST(request) {
       // No prompt to avoid hallucinations on silence
     });
 
-    console.log('Whisper transcription:', transcription.text);
-
     return NextResponse.json({
       text: transcription.text,
       success: true
     });
 
   } catch (error) {
-    console.error('Whisper STT error:', error);
     return NextResponse.json(
       { error: 'Speech recognition failed', message: error.message },
       { status: 500 }
