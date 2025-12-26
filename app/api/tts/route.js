@@ -10,20 +10,11 @@ import { NextResponse } from 'next/server';
 export async function POST(request) {
   try {
     const apiKey = process.env.MINIMAX_API_KEY;
-    const groupId = process.env.MINIMAX_GROUP_ID;
     
     if (!apiKey) {
       console.error('❌ MINIMAX_API_KEY not found in environment variables');
       return NextResponse.json(
         { error: 'MINIMAX_API_KEY not configured. Get it from https://platform.minimax.io/' },
-        { status: 500 }
-      );
-    }
-
-    if (!groupId) {
-      console.error('❌ MINIMAX_GROUP_ID not found in environment variables');
-      return NextResponse.json(
-        { error: 'MINIMAX_GROUP_ID not configured. Find it in MiniMax console under API settings or account info.' },
         { status: 500 }
       );
     }
@@ -40,11 +31,12 @@ export async function POST(request) {
 
     const voiceId = process.env.MINIMAX_VOICE_ID;
     
-    // MiniMax TTS API configuration - kept as specified
+    // MiniMax TTS API configuration with explicit output format
     const requestBody = {
-      model: 'speech-2.6-hd',
+      model: 'speech-2.6-turbo',
       text: text,
       stream: true,
+      output_format: 'hex',
       voice_setting: {
         voice_id: voiceId,
         speed: 1,
@@ -63,7 +55,7 @@ export async function POST(request) {
     console.log(`🎤 [TTS] Streaming text to MiniMax: "${text.substring(0, 50)}..."`);
     
     const response = await fetch(
-      `https://api.minimax.io/v1/t2a_v2`,
+      `https://api-uw.minimax.io/v1/t2a_v2`,
       {
         method: 'POST',
         headers: {
@@ -84,13 +76,12 @@ export async function POST(request) {
       );
     }
 
-    // MiniMax sends cumulative chunks - collect all and send only the last (complete) one
+    // Stream audio chunks immediately as they arrive from MiniMax
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let firstChunkTime = null;
     let audioChunkCount = 0;
-    let lastAudioBuffer = null;
     let totalAudioBytes = 0;
     
     const audioStream = new ReadableStream({
@@ -101,13 +92,7 @@ export async function POST(request) {
             
             if (done) {
               const elapsed = Date.now() - startTime;
-              console.log(`✅ [TTS] Complete: ${audioChunkCount} chunks received, sending last chunk (${lastAudioBuffer?.length || 0} bytes) in ${elapsed}ms`);
-              
-              // Send only the last chunk (which contains the complete audio)
-              if (lastAudioBuffer) {
-                controller.enqueue(lastAudioBuffer);
-              }
-              
+              console.log(`✅ [TTS] Stream complete: ${audioChunkCount} chunks, ${totalAudioBytes} bytes in ${elapsed}ms`);
               controller.close();
               break;
             }
@@ -136,28 +121,34 @@ export async function POST(request) {
                       return;
                     }
                     
-                    // Extract audio hex data
+                    // Extract status and audio hex data
+                    const status = eventData?.data?.status;
                     let audioHex = null;
+                    
                     if (eventData.data?.audio) {
                       audioHex = eventData.data.audio;
                     } else if (eventData.audio) {
                       audioHex = eventData.audio;
                     }
                     
-                    if (audioHex && audioHex.length > 0) {
-                      // Convert hex to binary
-                      const audioBuffer = Buffer.from(audioHex, 'hex');
+                    // Only process and send chunks when status === 1 (streaming audio)
+                    // status === 2 means done/summary, no audio to send
+                    if (status === 1 && audioHex && audioHex.length > 0) {
+                      // Convert hex to binary and immediately enqueue
+                      const audioBuf = Buffer.from(audioHex, 'hex');
                       audioChunkCount++;
-                      totalAudioBytes += audioBuffer.length;
+                      totalAudioBytes += audioBuf.length;
                       
                       if (firstChunkTime === null) {
                         firstChunkTime = Date.now() - startTime;
-                        console.log(`⚡ [TTS] First audio chunk in ${firstChunkTime}ms (${audioBuffer.length} bytes)`);
+                        console.log(`⚡ [TTS] First audio chunk in ${firstChunkTime}ms (${audioBuf.length} bytes)`);
                       }
                       
-                      // Keep overwriting with latest chunk (cumulative)
-                      lastAudioBuffer = audioBuffer;
-                      console.log(`🎵 [TTS] Chunk ${audioChunkCount}: ${audioBuffer.length} bytes (kept as last)`);
+                      // Stream immediately - don't accumulate
+                      controller.enqueue(audioBuf);
+                      console.log(`🎵 [TTS] Chunk ${audioChunkCount}: ${audioBuf.length} bytes → streamed to client`);
+                    } else if (status === 2) {
+                      console.log(`✅ [TTS] Received end marker (status: 2)`);
                     }
                   } catch (parseError) {
                     console.error('❌ [TTS] Failed to parse SSE data:', parseError);

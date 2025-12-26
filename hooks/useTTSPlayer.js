@@ -15,6 +15,7 @@ export function useTTSPlayer() {
   const audioPlayerRef = useRef(null);
   const lastProcessedLengthRef = useRef(0);
   const isCompleteRef = useRef(false);
+  const volumeIntervalRef = useRef(null);
 
   // Initialize audio player
   useEffect(() => {
@@ -38,20 +39,29 @@ export function useTTSPlayer() {
 
   // Visual volume animation when speaking
   useEffect(() => {
+    // Clear any existing interval
+    if (volumeIntervalRef.current) {
+      clearInterval(volumeIntervalRef.current);
+      volumeIntervalRef.current = null;
+    }
+
     if (!speaking) {
       setVolume(0);
       return;
     }
 
     let phase = 0;
-    const intervalId = setInterval(() => {
+    volumeIntervalRef.current = setInterval(() => {
       phase += 0.1;
       const simVolume = Math.abs(Math.sin(phase)) * 0.5 + 0.2;
       setVolume(simVolume);
     }, 50);
     
     return () => {
-      clearInterval(intervalId);
+      if (volumeIntervalRef.current) {
+        clearInterval(volumeIntervalRef.current);
+        volumeIntervalRef.current = null;
+      }
     };
   }, [speaking]);
 
@@ -69,9 +79,9 @@ export function useTTSPlayer() {
     const isFirstChunk = startIndex === 0;
     
     // Configuration
-    const MIN_FIRST_CHUNK = 60;     // Start speaking quickly (after ~10 words)
-    const MIN_CHUNK = 40;            // Minimum for subsequent chunks
-    const MAX_CHUNK = 150;           // Maximum before forcing split
+    const MIN_FIRST_CHUNK = 15;     // Start speaking quickly (after ~10 words)
+    const MIN_CHUNK = 20;            // Minimum for subsequent chunks
+    const MAX_CHUNK = 80;           // Maximum before forcing split
     
     // For first chunk: Start speaking ASAP without waiting for perfect punctuation
     if (isFirstChunk && remaining.length >= MIN_FIRST_CHUNK) {
@@ -199,6 +209,19 @@ export function useTTSPlayer() {
     // Process any remaining text with completion flag
     if (lastProcessedLengthRef.current < fullText.length) {
       speakStreaming(fullText);
+    }
+    
+    // Signal to audio player that all segments have been queued
+    // This allows the MediaSource to close properly after playback
+    if (audioPlayerRef.current) {
+      // Set flag after a tiny delay to ensure the last speakStreaming call completes
+      setTimeout(() => {
+        if (audioPlayerRef.current) {
+          audioPlayerRef.current.allSegmentsFetched = true;
+          audioPlayerRef.current.checkStreamComplete();
+          console.log('🏁 [TTS] Signaled audio player that all segments are complete');
+        }
+      }, 10);
     }
   }, [speakStreaming]);
 
