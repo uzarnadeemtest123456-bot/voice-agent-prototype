@@ -62,7 +62,7 @@ export async function POST(request) {
           text: text,
           // OPTIMIZED MODEL: eleven_turbo_v2_5 is fastest, but use eleven_flash_v2_5 for even better speed
           // Options: 'eleven_flash_v2_5' (fastest), 'eleven_turbo_v2_5' (fast), 'eleven_turbo_v2' (stable)
-          model_id: 'eleven_turbo_v2_5',
+          model_id: 'eleven_flash_v2_5',
           voice_settings: {
             // OPTIMIZED FOR STABILITY & NO STUTTERING:
             stability: 0.70,              // Increased from 0.5 to 0.70 for more consistent voice (less variation = less stutter)
