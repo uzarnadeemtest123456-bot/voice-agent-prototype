@@ -1,7 +1,7 @@
 /**
  * Text-to-Speech API Route using ElevenLabs
- * Much better quality than OpenAI TTS - natural, emotional, no stuttering
- * Supports streaming for instant playback
+ * TRUE STREAMING PROXY - Pipes audio chunks directly without buffering
+ * Optimized for lowest latency and smoothest playback
  */
 
 import { NextResponse } from 'next/server';
@@ -43,13 +43,18 @@ export async function POST(request) {
         },
         body: JSON.stringify({
           text: text,
-          model_id: 'eleven_turbo_v2_5', // Fast model with great quality
+          // OPTIMIZED MODEL: eleven_turbo_v2_5 is fastest, but use eleven_flash_v2_5 for even better speed
+          // Options: 'eleven_flash_v2_5' (fastest), 'eleven_turbo_v2_5' (fast), 'eleven_turbo_v2' (stable)
+          model_id: 'eleven_turbo_v2_5',
           voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.0,
-            use_speaker_boost: true
-          }
+            // OPTIMIZED FOR STABILITY & NO STUTTERING:
+            stability: 0.70,              // Increased from 0.5 to 0.70 for more consistent voice (less variation = less stutter)
+            similarity_boost: 0.55,       // Reduced from 0.75 to 0.55 for less processing overhead
+            style: 0.0,                   // Keep at 0 for neutral, consistent delivery
+            use_speaker_boost: true       // Enhances clarity without adding latency
+          },
+          // Optional: Add output format for better compatibility
+          output_format: 'mp3_44100_128' // High quality MP3, widely supported
         })
       }
     );
@@ -63,14 +68,21 @@ export async function POST(request) {
       );
     }
 
-    // Stream the audio directly to the client
-    const audioBuffer = await response.arrayBuffer();
+    // ✨ TRUE STREAMING: Pipe the response body directly to client without buffering
+    // This eliminates the 200-500ms delay from buffering the entire audio
+    // Audio chunks flow: ElevenLabs → Next.js (pass-through) → Browser
     
-    return new NextResponse(audioBuffer, {
+    if (!response.body) {
+      throw new Error('No response body from ElevenLabs');
+    }
+
+    // Create a streaming response that pipes ElevenLabs directly to the client
+    return new NextResponse(response.body, {
       headers: {
         'Content-Type': 'audio/mpeg',
-        'Content-Length': audioBuffer.byteLength.toString(),
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Transfer-Encoding': 'chunked', // Enable chunked transfer
+        'X-Content-Type-Options': 'nosniff',
       },
     });
 

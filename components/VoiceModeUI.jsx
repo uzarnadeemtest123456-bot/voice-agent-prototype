@@ -9,6 +9,7 @@ import { QueuedAudioPlayer } from "@/lib/audioPlayer";
 export default function VoiceModeUI() {
   // State management
   const [status, setStatus] = useState("idle"); // idle, listening, thinking, speaking, error
+  const [processingStage, setProcessingStage] = useState(""); // "transcribing" or "generating"
   const [volume, setVolume] = useState(0);
   const [error, setError] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -32,6 +33,19 @@ export default function VoiceModeUI() {
   const volumeCheckIntervalRef = useRef(null);
   const hasSpeechDetectedRef = useRef(false);
   const messagesRef = useRef([]);
+  
+  // Barge-in / Interruption refs
+  const activeTurnIdRef = useRef(0);
+  const bargeInIntervalRef = useRef(null);
+  const bargeInStartRef = useRef(null);
+  const bargeInCooldownUntilRef = useRef(0);
+
+  // Barge-in configuration
+  const BARGE_IN_SPEECH_THRESHOLD = 0.03; // Lowered to match listening threshold
+  const BARGE_IN_TRIGGER_HOLD_MS = 150;   // Reduced for faster response
+  const BARGE_IN_POLL_INTERVAL = 50;
+  const BARGE_IN_COOLDOWN_MS = 300;       // Reduced cooldown
+  const BARGE_IN_STARTUP_COOLDOWN_MS = 250; // Reduced startup cooldown
 
   // Sync status to ref
   useEffect(() => {
@@ -49,6 +63,8 @@ export default function VoiceModeUI() {
     
     audioPlayerRef.current.onStart = () => {
       isSpeakingRef.current = true;
+      // Set cooldown when each audio segment starts to prevent false triggers
+      bargeInCooldownUntilRef.current = Date.now() + BARGE_IN_COOLDOWN_MS;
     };
     
     audioPlayerRef.current.onEnd = () => {
@@ -103,19 +119,40 @@ export default function VoiceModeUI() {
     }
   }, [status, isSpeakingRef.current]);
 
+  // Barge-in detection: enable when speaking, disable otherwise
+  useEffect(() => {
+    if (status === "speaking") {
+      // Set cooldown to prevent false trigger from AI audio start
+      bargeInCooldownUntilRef.current = Date.now() + BARGE_IN_STARTUP_COOLDOWN_MS;
+      setupBargeInDetection();
+    } else {
+      cleanupBargeInDetection();
+    }
+    
+    return () => {
+      cleanupBargeInDetection();
+    };
+  }, [status]);
+
   async function startListening() {
     try {
-      // Request microphone access - works on ALL browsers
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true
-        } 
-      });
+      // Reuse existing stream if available (for barge-in to work)
+      let stream = streamRef.current;
       
-      streamRef.current = stream;
+      if (!stream || !stream.active) {
+        // Request microphone access with echo cancellation - works on ALL browsers
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          } 
+        });
+        streamRef.current = stream;
+      }
+      
       audioChunksRef.current = [];
 
       // Create MediaRecorder - works on Firefox, Chrome, Brave, Tor, etc.
@@ -140,8 +177,13 @@ export default function VoiceModeUI() {
       mediaRecorder.start(100); // Collect data every 100ms
       console.log("Recording started (cross-browser support)");
 
-      // Setup Voice Activity Detection (VAD)
-      setupVoiceActivityDetection(stream);
+      // Setup Voice Activity Detection (VAD) - reuse or create
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        setupVoiceActivityDetection(stream);
+      } else {
+        // Reuse existing AudioContext and analyser for barge-in
+        setupListeningVAD();
+      }
 
     } catch (err) {
       console.error("Error accessing microphone:", err);
@@ -183,17 +225,78 @@ export default function VoiceModeUI() {
         sum += normalized * normalized;
       }
       const rms = Math.sqrt(sum / bufferLength);
-      const volume = rms;
+      const calculatedVolume = rms;
+
+      // UPDATE VOLUME STATE FOR CIRCLE ANIMATION
+      setVolume(calculatedVolume * 2); // Amplify for better visual effect
 
       const SILENCE_THRESHOLD = 0.01; // Adjust based on environment
       const SPEECH_THRESHOLD = 0.03; // Volume level to consider as speech
 
       // Detect if user is actually speaking (above speech threshold)
-      if (volume > SPEECH_THRESHOLD) {
+      if (calculatedVolume > SPEECH_THRESHOLD) {
         hasSpeechDetectedRef.current = true;
       }
 
-      if (volume < SILENCE_THRESHOLD) {
+      if (calculatedVolume < SILENCE_THRESHOLD) {
+        if (!silenceStartRef.current) {
+          silenceStartRef.current = Date.now();
+        }
+
+        const silenceDuration = Date.now() - silenceStartRef.current;
+
+        // Auto-stop after 1.5 seconds of silence, but ONLY if speech was detected
+        if (silenceDuration > 1500 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
+          console.log("Speech detected and silence for 1.5s, auto-processing...");
+          clearInterval(volumeCheckIntervalRef.current);
+          stopListening();
+        }
+      } else {
+        silenceStartRef.current = null;
+      }
+    }, 100);
+  }
+
+  function setupListeningVAD() {
+    // Reuse existing analyser for listening VAD (for barge-in support)
+    if (!analyserRef.current) return;
+    
+    const analyser = analyserRef.current;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    // Reset speech detection flag
+    hasSpeechDetectedRef.current = false;
+
+    // Check volume every 100ms
+    volumeCheckIntervalRef.current = setInterval(() => {
+      if (statusRef.current !== "listening") {
+        return; // Only check when listening
+      }
+
+      analyser.getByteTimeDomainData(dataArray);
+
+      // Calculate average volume
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const normalized = (dataArray[i] - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / bufferLength);
+      const calculatedVolume = rms;
+
+      // UPDATE VOLUME STATE FOR CIRCLE ANIMATION
+      setVolume(calculatedVolume * 2); // Amplify for better visual effect
+
+      const SILENCE_THRESHOLD = 0.01; // Adjust based on environment
+      const SPEECH_THRESHOLD = 0.03; // Volume level to consider as speech
+
+      // Detect if user is actually speaking (above speech threshold)
+      if (calculatedVolume > SPEECH_THRESHOLD) {
+        hasSpeechDetectedRef.current = true;
+      }
+
+      if (calculatedVolume < SILENCE_THRESHOLD) {
         if (!silenceStartRef.current) {
           silenceStartRef.current = Date.now();
         }
@@ -213,47 +316,62 @@ export default function VoiceModeUI() {
   }
 
   function cleanupVoiceActivityDetection() {
+    // Only clear the interval, NOT the AudioContext or analyser (for barge-in)
     if (volumeCheckIntervalRef.current) {
       clearInterval(volumeCheckIntervalRef.current);
       volumeCheckIntervalRef.current = null;
     }
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
     silenceStartRef.current = null;
-    analyserRef.current = null;
   }
 
   function stopListening() {
+    // Only stop the MediaRecorder and VAD interval, NOT the mic stream
     cleanupVoiceActivityDetection();
     
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
     }
     
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
+    // DO NOT stop stream tracks - keep mic alive for barge-in
   }
 
   async function processRecording() {
+    console.log(`📝 Processing recording: ${audioChunksRef.current.length} chunks`);
+    
+    // Check if we have any audio chunks
+    if (audioChunksRef.current.length === 0) {
+      console.log("⚠️ No audio chunks to process, restarting listening");
+      setStatus("listening");
+      await startListening();
+      return;
+    }
+    
     const audioBlob = new Blob(audioChunksRef.current, { 
       type: audioChunksRef.current[0]?.type || 'audio/webm' 
     });
     
-    // Must have at least some audio data
-    if (audioBlob.size < 1000) {
-      console.log("Recording too short, ignoring");
+    console.log(`📦 Audio blob size: ${audioBlob.size} bytes`);
+    
+    // Increased minimum size threshold to avoid background noise
+    // 10KB is a reasonable minimum for meaningful speech (~1 second)
+    if (audioBlob.size < 10000) {
+      console.log("⚠️ Recording too short or low quality, ignoring and restarting");
       setStatus("listening");
-      await startListening(); // Restart listening
+      await startListening();
+      return;
+    }
+
+    // Check if actual speech was detected (not just noise)
+    if (!hasSpeechDetectedRef.current) {
+      console.log("⚠️ No clear speech detected, ignoring and restarting");
+      setStatus("listening");
+      await startListening();
       return;
     }
 
     setStatus("thinking");
+    setProcessingStage("transcribing");
     setUserTranscript("Transcribing...");
 
     try {
@@ -261,19 +379,33 @@ export default function VoiceModeUI() {
       const formData = new FormData();
       formData.append('audio', audioBlob, 'recording.webm');
 
+      console.log("🎙️ Sending to STT API...");
+      
       const sttResponse = await fetch('/api/stt', {
         method: 'POST',
         body: formData,
       });
 
       if (!sttResponse.ok) {
-        throw new Error('Transcription failed');
+        const errorText = await sttResponse.text();
+        console.error('STT API error:', errorText);
+        throw new Error(`Transcription failed: ${sttResponse.status}`);
       }
 
       const sttData = await sttResponse.json();
       const transcript = sttData.text.trim();
       
       console.log("Whisper transcript:", transcript);
+
+      // Check if transcription was filtered as hallucination
+      if (sttData.filtered) {
+        console.log("⚠️ Transcription was filtered as hallucination");
+        setStatus("listening");
+        setProcessingStage("");
+        setUserTranscript("");
+        await startListening();
+        return;
+      }
 
       if (transcript.length > 0) {
         setUserTranscript(transcript);
@@ -282,9 +414,15 @@ export default function VoiceModeUI() {
         const newMessages = [...currentMessages, { role: "user", text: transcript }];
         setMessages(newMessages);
         messagesRef.current = newMessages; // Update ref immediately
+        
+        // Now processing answer from n8n
+        setProcessingStage("generating");
         await handleUserQuery(transcript, newMessages);
       } else {
+        console.log("⚠️ Empty transcript received");
         setStatus("listening");
+        setProcessingStage("");
+        setUserTranscript("");
         await startListening();
       }
 
@@ -292,6 +430,7 @@ export default function VoiceModeUI() {
       console.error("Error processing recording:", err);
       setError(`Error: ${err.message}`);
       setStatus("error");
+      setProcessingStage("");
       
       setTimeout(() => {
         setStatus("listening");
@@ -319,15 +458,24 @@ export default function VoiceModeUI() {
   }
 
   async function handleUserQuery(query, currentMessages) {
+    // Increment turn ID to invalidate any previous ongoing work
+    activeTurnIdRef.current += 1;
+    const myTurn = activeTurnIdRef.current;
+    
     setStatus("thinking");
     setCurrentAssistantText("");
     assistantTextBufferRef.current = "";
     spokenUpToIndexRef.current = 0;
+    
+    // Clear any leftover audio segments from previous turn
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.clear();
+    }
 
     try {
       // Send query directly to n8n (Whisper handles transcription accurately)
       console.log('Sending query to n8n:', query);
-      await callBrainWebhook(query, currentMessages);
+      await callBrainWebhook(query, currentMessages, myTurn);
 
     } catch (err) {
       console.error("Error handling query:", err);
@@ -342,7 +490,7 @@ export default function VoiceModeUI() {
     }
   }
 
-  async function callBrainWebhook(userText, currentMessages) {
+  async function callBrainWebhook(userText, currentMessages, myTurn) {
     setStatus("thinking");
 
     try {
@@ -383,9 +531,9 @@ export default function VoiceModeUI() {
       const contentType = response.headers.get("content-type");
       
       if (contentType?.includes("text/event-stream")) {
-        await handleSSEStream(response);
+        await handleSSEStream(response, myTurn);
       } else {
-        await handleStreamingJSON(response);
+        await handleStreamingJSON(response, myTurn);
       }
 
     } catch (err) {
@@ -397,7 +545,7 @@ export default function VoiceModeUI() {
     }
   }
 
-  async function handleSSEStream(response) {
+  async function handleSSEStream(response, myTurn) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const parser = new SSEParser();
@@ -407,6 +555,12 @@ export default function VoiceModeUI() {
 
     try {
       while (true) {
+        // Check if this turn is still active
+        if (activeTurnIdRef.current !== myTurn) {
+          console.log("⚠️ SSE stream abandoned (interrupted)");
+          return;
+        }
+        
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -414,12 +568,22 @@ export default function VoiceModeUI() {
         const events = parser.parse(chunk);
 
         for (const event of events) {
+          // Check again in case of interruption during parsing
+          if (activeTurnIdRef.current !== myTurn) {
+            console.log("⚠️ SSE stream abandoned (interrupted)");
+            return;
+          }
+          
           if (event.event === "delta" && event.data?.text) {
             const newText = event.data.text;
+            // Clear processing stage on first text chunk
+            if (processingStage) {
+              setProcessingStage("");
+            }
             assistantTextBufferRef.current += newText;
             setCurrentAssistantText(assistantTextBufferRef.current);
           } else if (event.event === "done") {
-            await finishAssistantResponse();
+            await finishAssistantResponse(myTurn);
             return;
           } else if (event.event === "error") {
             throw new Error(event.data?.message || "Stream error");
@@ -427,17 +591,18 @@ export default function VoiceModeUI() {
         }
       }
 
-      await finishAssistantResponse();
+      await finishAssistantResponse(myTurn);
 
     } catch (err) {
       if (err.name === "AbortError") {
+        console.log("⚠️ SSE stream aborted");
         return;
       }
       throw err;
     }
   }
 
-  async function handleStreamingJSON(response) {
+  async function handleStreamingJSON(response, myTurn) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -447,6 +612,12 @@ export default function VoiceModeUI() {
 
     try {
       while (true) {
+        // Check if this turn is still active
+        if (activeTurnIdRef.current !== myTurn) {
+          console.log("⚠️ JSON stream abandoned (interrupted)");
+          return;
+        }
+        
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -458,6 +629,12 @@ export default function VoiceModeUI() {
 
         for (const line of lines) {
           if (!line.trim()) continue;
+
+          // Check again before processing
+          if (activeTurnIdRef.current !== myTurn) {
+            console.log("⚠️ JSON stream abandoned (interrupted)");
+            return;
+          }
 
           try {
             const jsonObj = JSON.parse(line);
@@ -473,6 +650,10 @@ export default function VoiceModeUI() {
                 // Content is regular text
               }
               
+              // Clear processing stage on first text chunk
+              if (processingStage) {
+                setProcessingStage("");
+              }
               assistantTextBufferRef.current += jsonObj.content;
               setCurrentAssistantText(assistantTextBufferRef.current);
             }
@@ -494,19 +675,45 @@ export default function VoiceModeUI() {
         }
       }
 
-      await finishAssistantResponse();
+      await finishAssistantResponse(myTurn);
 
     } catch (err) {
       if (err.name === "AbortError") {
+        console.log("⚠️ JSON stream aborted");
         return;
       }
       throw err;
     }
   }
 
-  async function finishAssistantResponse() {
+  async function finishAssistantResponse(myTurn) {
+    // Check if this turn is still active (could have been interrupted)
+    if (myTurn && activeTurnIdRef.current !== myTurn) {
+      console.log("⚠️ finishAssistantResponse abandoned (interrupted)");
+      return;
+    }
+    
+    // Force any remaining unspoken text into the queue
+    const fullText = assistantTextBufferRef.current;
+    const spokenUpTo = spokenUpToIndexRef.current;
+    
+    if (spokenUpTo < fullText.length) {
+      const remainingText = fullText.substring(spokenUpTo).trim();
+      if (remainingText.length > 0) {
+        console.log(`🎤 Forcing final segment (${remainingText.length} chars): "${remainingText}"`);
+        await audioPlayerRef.current.addToQueue(remainingText);
+        spokenUpToIndexRef.current = fullText.length;
+      }
+    }
+    
     // Wait for all TTS to complete
     await waitForPlaybackComplete();
+
+    // Check AGAIN after waiting - could have been interrupted while waiting
+    if (myTurn && activeTurnIdRef.current !== myTurn) {
+      console.log("⚠️ finishAssistantResponse abandoned after playback (interrupted)");
+      return;
+    }
 
     // Add final message
     if (assistantTextBufferRef.current) {
@@ -515,10 +722,17 @@ export default function VoiceModeUI() {
 
     setCurrentAssistantText("");
     setUserTranscript("");
+    setProcessingStage("");
     setVolume(0);
     
     // Wait 500ms before restarting listening to avoid picking up echo/speaker output
     await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Final check before starting new recording
+    if (myTurn && activeTurnIdRef.current !== myTurn) {
+      console.log("⚠️ finishAssistantResponse skipping startListening (interrupted)");
+      return;
+    }
     
     // Auto-restart listening for next turn
     setStatus("listening");
@@ -562,65 +776,271 @@ export default function VoiceModeUI() {
     const remaining = text.substring(startIndex);
     if (remaining.length === 0) return null;
 
-    // For first segment, start speaking quickly with reasonable amount
-    const isFirstSegment = spokenUpToIndexRef.current === 1;
+    // IMPROVED SEGMENTATION (Option 3): Larger chunks for smoother playback
+    // Target: 50-120 chars per segment (reduces API calls, better buffering)
     
-    if (isFirstSegment && remaining.length >= 20) {
+    const isFirstSegment = spokenUpToIndexRef.current === 1;
+    const MIN_SEGMENT_LENGTH = 20;  // Increased from 10-20
+    const IDEAL_SEGMENT_LENGTH = 80; // Sweet spot for natural speech
+    const MAX_SEGMENT_LENGTH = 150;  // Upper limit
+    
+    // For first segment, start speaking quickly but with substantial content
+    if (isFirstSegment && remaining.length >= MIN_SEGMENT_LENGTH) {
+      // Try to get a complete sentence (40-120 chars)
       const firstSentenceEnd = remaining.search(/[.!?]\s/);
-      if (firstSentenceEnd !== -1 && firstSentenceEnd >= 15 && firstSentenceEnd <= 80) {
+      if (firstSentenceEnd !== -1 && firstSentenceEnd >= MIN_SEGMENT_LENGTH && firstSentenceEnd <= MAX_SEGMENT_LENGTH) {
         return remaining.substring(0, firstSentenceEnd + 1).trim();
       }
       
-      const firstPause = remaining.search(/[,;:]\s/);
-      if (firstPause !== -1 && firstPause >= 15 && firstPause <= 60) {
-        return remaining.substring(0, firstPause + 1).trim();
+      // If sentence too short, try to get to a natural pause point
+      if (firstSentenceEnd !== -1 && firstSentenceEnd < MIN_SEGMENT_LENGTH) {
+        // Look for next pause after minimum length
+        const afterMinimum = remaining.substring(MIN_SEGMENT_LENGTH);
+        const nextPause = afterMinimum.search(/[.!?,;:]\s/);
+        if (nextPause !== -1 && (MIN_SEGMENT_LENGTH + nextPause) <= MAX_SEGMENT_LENGTH) {
+          return remaining.substring(0, MIN_SEGMENT_LENGTH + nextPause + 1).trim();
+        }
       }
       
-      // Minimum 20 characters for first segment
-      if (remaining.length >= 25) {
-        const chunk = remaining.substring(0, 40);
+      // Fallback: get ideal chunk at word boundary
+      if (remaining.length >= IDEAL_SEGMENT_LENGTH) {
+        const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
         const lastSpace = chunk.lastIndexOf(" ");
-        if (lastSpace > 15) {
+        if (lastSpace > MIN_SEGMENT_LENGTH) {
+          return chunk.substring(0, lastSpace).trim();
+        }
+      }
+      
+      // Minimum viable first segment
+      if (remaining.length >= MIN_SEGMENT_LENGTH) {
+        const chunk = remaining.substring(0, MIN_SEGMENT_LENGTH + 20);
+        const lastSpace = chunk.lastIndexOf(" ");
+        if (lastSpace > MIN_SEGMENT_LENGTH) {
           return chunk.substring(0, lastSpace).trim();
         }
       }
     }
 
-    // Split by sentence (prefer complete sentences)
+    // For subsequent segments: prioritize complete sentences (50-120 chars ideal)
     const sentenceEnd = remaining.search(/[.!?]\s/);
-    if (sentenceEnd !== -1 && sentenceEnd >= 15) {
-      return remaining.substring(0, sentenceEnd + 1).trim();
+    if (sentenceEnd !== -1) {
+      // Perfect: sentence is in ideal range
+      if (sentenceEnd >= MIN_SEGMENT_LENGTH && sentenceEnd <= MAX_SEGMENT_LENGTH) {
+        return remaining.substring(0, sentenceEnd + 1).trim();
+      }
+      
+      // Sentence too short: try to combine with next phrase
+      if (sentenceEnd < MIN_SEGMENT_LENGTH && remaining.length > MIN_SEGMENT_LENGTH) {
+        const afterSentence = remaining.substring(sentenceEnd + 2);
+        const nextPause = afterSentence.search(/[.!?,;:]\s/);
+        
+        if (nextPause !== -1) {
+          const totalLength = sentenceEnd + 2 + nextPause + 1;
+          if (totalLength >= MIN_SEGMENT_LENGTH && totalLength <= MAX_SEGMENT_LENGTH) {
+            return remaining.substring(0, totalLength).trim();
+          }
+        }
+        
+        // Just take to next word boundary after minimum
+        if (remaining.length >= IDEAL_SEGMENT_LENGTH) {
+          const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
+          const lastSpace = chunk.lastIndexOf(" ");
+          if (lastSpace > MIN_SEGMENT_LENGTH) {
+            return chunk.substring(0, lastSpace).trim();
+          }
+        }
+      }
+      
+      // Sentence too long but still acceptable
+      if (sentenceEnd > MAX_SEGMENT_LENGTH) {
+        // Split at comma or semicolon within range
+        const pauseEnd = remaining.search(/[,;:]\s/);
+        if (pauseEnd !== -1 && pauseEnd >= MIN_SEGMENT_LENGTH && pauseEnd <= IDEAL_SEGMENT_LENGTH) {
+          return remaining.substring(0, pauseEnd + 1).trim();
+        }
+        
+        // Split at ideal length, word boundary
+        const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
+        const lastSpace = chunk.lastIndexOf(" ");
+        if (lastSpace > MIN_SEGMENT_LENGTH) {
+          return chunk.substring(0, lastSpace).trim();
+        }
+      }
     }
 
-    // Split by comma (only if sufficient length)
+    // No sentence ending found: look for natural pause points
     const pauseEnd = remaining.search(/[,;:]\s/);
-    if (pauseEnd !== -1 && pauseEnd >= 25) {
+    if (pauseEnd !== -1 && pauseEnd >= MIN_SEGMENT_LENGTH && pauseEnd <= IDEAL_SEGMENT_LENGTH) {
       return remaining.substring(0, pauseEnd + 1).trim();
     }
 
-    // Word boundaries - get chunks for smooth TTS
-    if (remaining.length >= 30) {
-      const chunk = remaining.substring(0, 50);
+    // Create chunks at word boundaries (target: IDEAL_SEGMENT_LENGTH)
+    if (remaining.length >= IDEAL_SEGMENT_LENGTH) {
+      const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
       const lastSpace = chunk.lastIndexOf(" ");
-      if (lastSpace > 20) {
+      if (lastSpace > MIN_SEGMENT_LENGTH) {
         return chunk.substring(0, lastSpace).trim();
-      }
-      if (remaining.length >= 30) {
-        return remaining.substring(0, 30).trim();
       }
     }
 
-    // For very end, return whatever is left if it's at least 10 chars
-    if (remaining.length >= 10) {
+    // Smaller chunk but still above minimum
+    if (remaining.length >= MIN_SEGMENT_LENGTH) {
+      const chunk = remaining.substring(0, MIN_SEGMENT_LENGTH + 20);
+      const lastSpace = chunk.lastIndexOf(" ");
+      if (lastSpace > MIN_SEGMENT_LENGTH) {
+        return chunk.substring(0, lastSpace).trim();
+      }
+      // Force return minimum length at word boundary
+      const minChunk = remaining.substring(0, MIN_SEGMENT_LENGTH);
+      const lastSpaceMin = minChunk.lastIndexOf(" ");
+      if (lastSpaceMin > 25) {
+        return minChunk.substring(0, lastSpaceMin).trim();
+      }
+    }
+
+    // Final segment: return what's left if it's substantial enough
+    if (remaining.length >= 25) {
       return remaining.trim();
     }
 
     return null;
   }
 
+  function cleanupBargeInDetection() {
+    if (bargeInIntervalRef.current) {
+      clearInterval(bargeInIntervalRef.current);
+      bargeInIntervalRef.current = null;
+    }
+    bargeInStartRef.current = null;
+  }
+
+  function setupBargeInDetection() {
+    if (!analyserRef.current) {
+      console.log("⚠️ Barge-in setup failed: No analyser available");
+      return;
+    }
+    
+    console.log("✅ Barge-in detection STARTED");
+    
+    const analyser = analyserRef.current;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    bargeInIntervalRef.current = setInterval(() => {
+      // Only detect during speaking state
+      if (statusRef.current !== "speaking") {
+        return;
+      }
+
+      // Check cooldown
+      const now = Date.now();
+      if (now < bargeInCooldownUntilRef.current) {
+        return;
+      }
+
+      analyser.getByteTimeDomainData(dataArray);
+
+      // Calculate RMS
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const normalized = (dataArray[i] - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / bufferLength);
+
+      // Check if speech detected
+      if (rms > BARGE_IN_SPEECH_THRESHOLD) {
+        if (!bargeInStartRef.current) {
+          bargeInStartRef.current = now;
+          console.log(`🎤 Speech detected! RMS: ${rms.toFixed(4)}`);
+        }
+
+        const holdDuration = now - bargeInStartRef.current;
+
+        // Trigger interruption if held long enough
+        if (holdDuration >= BARGE_IN_TRIGGER_HOLD_MS) {
+          console.log(`🛑 Barge-in triggered after ${holdDuration}ms! Interrupting AI...`);
+          bargeInStartRef.current = null;
+          interruptAndStartListening();
+        }
+      } else {
+        if (bargeInStartRef.current) {
+          bargeInStartRef.current = null;
+        }
+      }
+    }, BARGE_IN_POLL_INTERVAL);
+  }
+
+  async function interruptAndStartListening() {
+    console.log("🛑 INTERRUPTION TRIGGERED");
+    
+    // 1. Invalidate old turn
+    activeTurnIdRef.current += 1;
+    const myTurn = activeTurnIdRef.current;
+    
+    // 2. Stop audio immediately and resume for next turn
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.stop();
+      if (audioPlayerRef.current.clear) {
+        audioPlayerRef.current.clear();
+      }
+      // IMPORTANT: Resume to allow next turn's audio to play
+      audioPlayerRef.current.resume();
+    }
+    
+    // 3. Abort n8n request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    
+    // 4. Optional: Save partial assistant text to messages
+    if (assistantTextBufferRef.current) {
+      setMessages(prev => [...prev, { 
+        role: "assistant", 
+        text: assistantTextBufferRef.current + " [interrupted]" 
+      }]);
+    }
+    
+    // 5. Clear streaming buffers
+    assistantTextBufferRef.current = "";
+    setCurrentAssistantText("");
+    spokenUpToIndexRef.current = 0;
+    setProcessingStage("");
+    
+    // 6. Switch to listening
+    setStatus("listening");
+    cleanupBargeInDetection();
+    
+    // Race-guard
+    if (activeTurnIdRef.current !== myTurn) return;
+    
+    // 7. Start recording new input
+    await startListening();
+  }
+
   function cleanup() {
-    stopListening();
     cleanupVoiceActivityDetection();
+    cleanupBargeInDetection();
+    
+    // Stop MediaRecorder
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    
+    // NOW stop the mic stream (only on full cleanup)
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    
+    // Close AudioContext (only on full cleanup)
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    
+    analyserRef.current = null;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -826,7 +1246,7 @@ export default function VoiceModeUI() {
                 </motion.div>
               )}
 
-              {status === "thinking" && !currentAssistantText && (
+              {!currentAssistantText && processingStage && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -839,7 +1259,10 @@ export default function VoiceModeUI() {
                         <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></span>
                         <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "0.4s" }}></span>
                       </div>
-                      <span className="text-sm font-medium">Processing...</span>
+                      <span className="text-sm font-medium">
+                        {processingStage === "transcribing" && "Processing voice..."}
+                        {processingStage === "generating" && "Processing answer..."}
+                      </span>
                     </div>
                   </div>
                 </motion.div>
