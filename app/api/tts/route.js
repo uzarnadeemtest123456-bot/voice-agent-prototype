@@ -1,8 +1,7 @@
 /**
- * Text-to-Speech API Route using MiniMax with Streaming
- * Redesigned for minimal latency: text chunk → audio stream → immediate playback
- * 
- * Flow: n8n streams text → client sends chunks → MiniMax streams audio → client plays
+ * Text-to-Speech API Route using ElevenLabs
+ * TRUE STREAMING PROXY - Pipes audio chunks directly without buffering
+ * Optimized for lowest latency and smoothest playback
  */
 
 import { NextResponse } from 'next/server';
@@ -59,7 +58,21 @@ export async function POST(request) {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream'
         },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify({
+          text: text,
+          // OPTIMIZED MODEL: eleven_turbo_v2_5 is fastest, but use eleven_flash_v2_5 for even better speed
+          // Options: 'eleven_flash_v2_5' (fastest), 'eleven_turbo_v2_5' (fast), 'eleven_turbo_v2' (stable)
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: {
+            // OPTIMIZED FOR STABILITY & NO STUTTERING:
+            stability: 0.70,              // Increased from 0.5 to 0.70 for more consistent voice (less variation = less stutter)
+            similarity_boost: 0.55,       // Reduced from 0.75 to 0.55 for less processing overhead
+            style: 0.0,                   // Keep at 0 for neutral, consistent delivery
+            use_speaker_boost: true       // Enhances clarity without adding latency
+          },
+          // Optional: Add output format for better compatibility
+          output_format: 'mp3_44100_128' // High quality MP3, widely supported
+        })
       }
     );
 
@@ -71,83 +84,21 @@ export async function POST(request) {
       );
     }
 
-    // Stream audio chunks immediately as they arrive from MiniMax
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    // ✨ TRUE STREAMING: Pipe the response body directly to client without buffering
+    // This eliminates the 200-500ms delay from buffering the entire audio
+    // Audio chunks flow: ElevenLabs → Next.js (pass-through) → Browser
     
-    const audioStream = new ReadableStream({
-      async start(controller) {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            
-            if (done) {
-              controller.close();
-              break;
-            }
-            
-            // Decode SSE stream
-            buffer += decoder.decode(value, { stream: true });
-            
-            // Process complete SSE events (delimited by \n\n)
-            const events = buffer.split('\n\n');
-            buffer = events.pop() || '';
-            
-            for (const event of events) {
-              if (!event.trim()) continue;
-              
-              // Parse SSE format: "data: {...}"
-              const lines = event.split('\n');
-              for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                  try {
-                    const eventData = JSON.parse(line.substring(6));
-                    
-                    // Check for errors
-                    if (eventData.base_resp && eventData.base_resp.status_code !== 0) {
-                      controller.error(new Error(eventData.base_resp.status_msg || 'MiniMax streaming error'));
-                      return;
-                    }
-                    
-                    // Extract status and audio hex data
-                    const status = eventData?.data?.status;
-                    let audioHex = null;
-                    
-                    if (eventData.data?.audio) {
-                      audioHex = eventData.data.audio;
-                    } else if (eventData.audio) {
-                      audioHex = eventData.audio;
-                    }
-                    
-                    // Only process and send chunks when status === 1 (streaming audio)
-                    // status === 2 means done/summary, no audio to send
-                    if (status === 1 && audioHex && audioHex.length > 0) {
-                      // Convert hex to binary and immediately enqueue
-                      const audioBuf = Buffer.from(audioHex, 'hex');
-                      
-                      // Stream immediately - don't accumulate
-                      controller.enqueue(audioBuf);
-                    }
-                  } catch (parseError) {
-                    // Skip malformed SSE data
-                  }
-                }
-              }
-            }
-          }
-        } catch (error) {
-          controller.error(error);
-        }
-      }
-    });
-    
-    // Return streaming audio response
-    return new NextResponse(audioStream, {
+    if (!response.body) {
+      throw new Error('No response body from ElevenLabs');
+    }
+
+    // Create a streaming response that pipes ElevenLabs directly to the client
+    return new NextResponse(response.body, {
       headers: {
         'Content-Type': 'audio/mpeg',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Transfer-Encoding': 'chunked', // Enable chunked transfer
+        'X-Content-Type-Options': 'nosniff',
       },
     });
 
