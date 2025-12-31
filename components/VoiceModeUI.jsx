@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { SSEParser } from "@/lib/sse";
 import { getBreathingScale } from "@/lib/audioLevel";
-import { QueuedAudioPlayer } from "@/lib/audioPlayer";
+import { StreamingAudioPlayer } from "@/lib/streamingAudioPlayer";
 
 export default function VoiceModeUI() {
   // State management
@@ -25,6 +25,8 @@ export default function VoiceModeUI() {
   const spokenUpToIndexRef = useRef(0);
   const assistantTextBufferRef = useRef("");
   const isSpeakingRef = useRef(false);
+  const ttsStreamStartedRef = useRef(false);
+  const lastSentIndexRef = useRef(0);
   const statusRef = useRef("idle");
   const streamRef = useRef(null);
   const analyserRef = useRef(null);
@@ -59,7 +61,7 @@ export default function VoiceModeUI() {
 
   // Initialize audio player
   useEffect(() => {
-    audioPlayerRef.current = new QueuedAudioPlayer();
+    audioPlayerRef.current = new StreamingAudioPlayer();
     
     audioPlayerRef.current.onStart = () => {
       isSpeakingRef.current = true;
@@ -82,12 +84,6 @@ export default function VoiceModeUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, currentAssistantText]);
 
-  // Process TTS for streaming responses
-  useEffect(() => {
-    if (status === "speaking" && audioPlayerRef.current && spokenUpToIndexRef.current > 0) {
-      processNextTTSSegment();
-    }
-  }, [currentAssistantText, status]);
 
   // Breathing animation for idle state
   useEffect(() => {
@@ -466,6 +462,8 @@ export default function VoiceModeUI() {
     setCurrentAssistantText("");
     assistantTextBufferRef.current = "";
     spokenUpToIndexRef.current = 0;
+    ttsStreamStartedRef.current = false;
+    lastSentIndexRef.current = 0;
     
     // Clear any leftover audio segments from previous turn
     if (audioPlayerRef.current) {
@@ -550,20 +548,32 @@ export default function VoiceModeUI() {
     const decoder = new TextDecoder();
     const parser = new SSEParser();
 
-    setStatus("speaking");
-    spokenUpToIndexRef.current = 1; // Enable streaming TTS
+    setStatus("thinking");
+
+    // Timeout protection - 30 seconds max
+    const streamTimeout = setTimeout(() => {
+      if (activeTurnIdRef.current === myTurn) {
+        console.error("⏱️ SSE stream timeout - aborting");
+        reader.cancel();
+        throw new Error("Stream timeout - no response from n8n");
+      }
+    }, 30000);
 
     try {
+      let hasReceivedData = false;
+      
       while (true) {
         // Check if this turn is still active
         if (activeTurnIdRef.current !== myTurn) {
           console.log("⚠️ SSE stream abandoned (interrupted)");
+          clearTimeout(streamTimeout);
           return;
         }
         
         const { done, value } = await reader.read();
         if (done) break;
 
+        hasReceivedData = true;
         const chunk = decoder.decode(value, { stream: true });
         const events = parser.parse(chunk);
 
@@ -571,6 +581,7 @@ export default function VoiceModeUI() {
           // Check again in case of interruption during parsing
           if (activeTurnIdRef.current !== myTurn) {
             console.log("⚠️ SSE stream abandoned (interrupted)");
+            clearTimeout(streamTimeout);
             return;
           }
           
@@ -582,18 +593,33 @@ export default function VoiceModeUI() {
             }
             assistantTextBufferRef.current += newText;
             setCurrentAssistantText(assistantTextBufferRef.current);
+            
+            // Check if we should start TTS stream (first sentence detected)
+            await tryStartIncrementalTTS(myTurn);
           } else if (event.event === "done") {
+            clearTimeout(streamTimeout);
             await finishAssistantResponse(myTurn);
             return;
           } else if (event.event === "error") {
+            clearTimeout(streamTimeout);
             throw new Error(event.data?.message || "Stream error");
           }
         }
       }
 
+      clearTimeout(streamTimeout);
+      
+      // If stream ended but no data received, handle as error
+      if (!hasReceivedData) {
+        console.error("⚠️ SSE stream ended with no data");
+        throw new Error("No response from n8n");
+      }
+
       await finishAssistantResponse(myTurn);
 
     } catch (err) {
+      clearTimeout(streamTimeout);
+      
       if (err.name === "AbortError") {
         console.log("⚠️ SSE stream aborted");
         return;
@@ -607,8 +633,7 @@ export default function VoiceModeUI() {
     const decoder = new TextDecoder();
     let buffer = "";
 
-    setStatus("speaking");
-    spokenUpToIndexRef.current = 1; // Enable streaming TTS
+    setStatus("thinking");
 
     try {
       while (true) {
@@ -656,6 +681,12 @@ export default function VoiceModeUI() {
               }
               assistantTextBufferRef.current += jsonObj.content;
               setCurrentAssistantText(assistantTextBufferRef.current);
+              
+              // Check if we should start TTS stream (first sentence detected)
+              await tryStartIncrementalTTS(myTurn);
+              
+              // If stream is active, send new chunks
+              await sendIncrementalTextChunks(myTurn);
             }
           } catch (parseError) {
             console.error("Error parsing JSON line:", parseError);
@@ -693,16 +724,36 @@ export default function VoiceModeUI() {
       return;
     }
     
-    // Force any remaining unspoken text into the queue
-    const fullText = assistantTextBufferRef.current;
-    const spokenUpTo = spokenUpToIndexRef.current;
+    const fullText = assistantTextBufferRef.current.trim();
     
-    if (spokenUpTo < fullText.length) {
-      const remainingText = fullText.substring(spokenUpTo).trim();
-      if (remainingText.length > 0) {
-        console.log(`🎤 Forcing final segment (${remainingText.length} chars): "${remainingText}"`);
-        await audioPlayerRef.current.addToQueue(remainingText);
-        spokenUpToIndexRef.current = fullText.length;
+    if (fullText.length > 0) {
+      setStatus("speaking");
+      
+      try {
+        // If incremental streaming was started, send remaining text and end stream
+        if (ttsStreamStartedRef.current) {
+          console.log(`📊 Incremental TTS active - sending remaining text and closing stream`);
+          
+          // Send any remaining text
+          if (lastSentIndexRef.current < fullText.length) {
+            const remainingText = fullText.substring(lastSentIndexRef.current).trim();
+            if (remainingText.length > 0) {
+              console.log(`📤 Sending final text chunk (${remainingText.length} chars)`);
+              await audioPlayerRef.current.sendTextChunk(remainingText);
+            }
+          }
+          
+          // Signal end of stream
+          await audioPlayerRef.current.endIncrementalStream();
+          console.log('✅ Incremental TTS stream completed');
+          
+        } else {
+          // Fallback: response was too short, use regular streaming
+          console.log(`🎤 Response too short for incremental - using regular streaming (${fullText.length} chars)`);
+          await audioPlayerRef.current.streamText(fullText);
+        }
+      } catch (error) {
+        console.error('Error streaming TTS:', error);
       }
     }
     
@@ -745,165 +796,87 @@ export default function VoiceModeUI() {
     console.log("Ready for next turn");
   }
 
+  /**
+   * Try to start incremental TTS when first sentence is detected
+   * This enables MINIMUM LATENCY - audio starts while n8n is still generating
+   */
+  async function tryStartIncrementalTTS(myTurn) {
+    // Already started or turn invalidated
+    if (ttsStreamStartedRef.current || activeTurnIdRef.current !== myTurn) {
+      return;
+    }
+
+    const fullText = assistantTextBufferRef.current;
+    const MIN_CHARS_FOR_TTS = 35; // Reduced from 50 to 35 for faster response
+
+    // Look for first complete sentence
+    const firstSentenceMatch = fullText.match(/^.+?[.!?]\s/);
+    
+    if (firstSentenceMatch && fullText.length >= MIN_CHARS_FOR_TTS) {
+      const firstSentence = firstSentenceMatch[0];
+      
+      console.log(`🚀 FAST START: Starting TTS with first sentence (${firstSentence.length} chars)`);
+      console.log(`📊 Streaming will continue while n8n generates remaining ${fullText.length - firstSentence.length}+ chars`);
+      
+      ttsStreamStartedRef.current = true;
+      lastSentIndexRef.current = firstSentence.length;
+      setStatus("speaking");
+      
+      try {
+        // Start incremental stream with first sentence
+        await audioPlayerRef.current.startIncrementalStream(firstSentence.trim());
+        
+        // Send any additional text that's already buffered
+        if (fullText.length > lastSentIndexRef.current) {
+          const additionalText = fullText.substring(lastSentIndexRef.current).trim();
+          if (additionalText.length > 0) {
+            await audioPlayerRef.current.sendTextChunk(additionalText);
+            lastSentIndexRef.current = fullText.length;
+          }
+        }
+      } catch (error) {
+        console.error('Error starting incremental TTS:', error);
+        ttsStreamStartedRef.current = false;
+      }
+    }
+  }
+
+  /**
+   * Send new text chunks to active TTS stream
+   */
+  async function sendIncrementalTextChunks(myTurn) {
+    if (!ttsStreamStartedRef.current || activeTurnIdRef.current !== myTurn) {
+      return;
+    }
+
+    const fullText = assistantTextBufferRef.current;
+    const lastSent = lastSentIndexRef.current;
+
+    if (lastSent >= fullText.length) {
+      return;
+    }
+
+    const newText = fullText.substring(lastSent);
+    
+    // Send complete sentences as they arrive
+    const sentenceMatch = newText.match(/^.+?[.!?]\s/);
+    if (sentenceMatch) {
+      const sentence = sentenceMatch[0];
+      console.log(`📤 Sending next sentence to TTS (${sentence.length} chars)`);
+      
+      try {
+        await audioPlayerRef.current.sendTextChunk(sentence.trim());
+        lastSentIndexRef.current += sentence.length;
+      } catch (error) {
+        console.error('Error sending text chunk:', error);
+      }
+    }
+  }
+
   async function waitForPlaybackComplete() {
     while (audioPlayerRef.current.isProcessing || isSpeakingRef.current) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-  }
-
-  async function processNextTTSSegment() {
-    const fullText = assistantTextBufferRef.current;
-    const spokenUpTo = spokenUpToIndexRef.current;
-
-    if (spokenUpTo >= fullText.length) {
-      return;
-    }
-
-    const segment = extractNextSegment(fullText, spokenUpTo);
-
-    if (segment) {
-      spokenUpToIndexRef.current += segment.length;
-      await audioPlayerRef.current.addToQueue(segment.trim());
-      
-      // Check if there's more
-      if (spokenUpToIndexRef.current < assistantTextBufferRef.current.length) {
-        setTimeout(() => processNextTTSSegment(), 50);
-      }
-    }
-  }
-
-  function extractNextSegment(text, startIndex) {
-    const remaining = text.substring(startIndex);
-    if (remaining.length === 0) return null;
-
-    // IMPROVED SEGMENTATION (Option 3): Larger chunks for smoother playback
-    // Target: 50-120 chars per segment (reduces API calls, better buffering)
-    
-    const isFirstSegment = spokenUpToIndexRef.current === 1;
-    const MIN_SEGMENT_LENGTH = 20;  // Increased from 10-20
-    const IDEAL_SEGMENT_LENGTH = 80; // Sweet spot for natural speech
-    const MAX_SEGMENT_LENGTH = 150;  // Upper limit
-    
-    // For first segment, start speaking quickly but with substantial content
-    if (isFirstSegment && remaining.length >= MIN_SEGMENT_LENGTH) {
-      // Try to get a complete sentence (40-120 chars)
-      const firstSentenceEnd = remaining.search(/[.!?]\s/);
-      if (firstSentenceEnd !== -1 && firstSentenceEnd >= MIN_SEGMENT_LENGTH && firstSentenceEnd <= MAX_SEGMENT_LENGTH) {
-        return remaining.substring(0, firstSentenceEnd + 1).trim();
-      }
-      
-      // If sentence too short, try to get to a natural pause point
-      if (firstSentenceEnd !== -1 && firstSentenceEnd < MIN_SEGMENT_LENGTH) {
-        // Look for next pause after minimum length
-        const afterMinimum = remaining.substring(MIN_SEGMENT_LENGTH);
-        const nextPause = afterMinimum.search(/[.!?,;:]\s/);
-        if (nextPause !== -1 && (MIN_SEGMENT_LENGTH + nextPause) <= MAX_SEGMENT_LENGTH) {
-          return remaining.substring(0, MIN_SEGMENT_LENGTH + nextPause + 1).trim();
-        }
-      }
-      
-      // Fallback: get ideal chunk at word boundary
-      if (remaining.length >= IDEAL_SEGMENT_LENGTH) {
-        const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
-        const lastSpace = chunk.lastIndexOf(" ");
-        if (lastSpace > MIN_SEGMENT_LENGTH) {
-          return chunk.substring(0, lastSpace).trim();
-        }
-      }
-      
-      // Minimum viable first segment
-      if (remaining.length >= MIN_SEGMENT_LENGTH) {
-        const chunk = remaining.substring(0, MIN_SEGMENT_LENGTH + 20);
-        const lastSpace = chunk.lastIndexOf(" ");
-        if (lastSpace > MIN_SEGMENT_LENGTH) {
-          return chunk.substring(0, lastSpace).trim();
-        }
-      }
-    }
-
-    // For subsequent segments: prioritize complete sentences (50-120 chars ideal)
-    const sentenceEnd = remaining.search(/[.!?]\s/);
-    if (sentenceEnd !== -1) {
-      // Perfect: sentence is in ideal range
-      if (sentenceEnd >= MIN_SEGMENT_LENGTH && sentenceEnd <= MAX_SEGMENT_LENGTH) {
-        return remaining.substring(0, sentenceEnd + 1).trim();
-      }
-      
-      // Sentence too short: try to combine with next phrase
-      if (sentenceEnd < MIN_SEGMENT_LENGTH && remaining.length > MIN_SEGMENT_LENGTH) {
-        const afterSentence = remaining.substring(sentenceEnd + 2);
-        const nextPause = afterSentence.search(/[.!?,;:]\s/);
-        
-        if (nextPause !== -1) {
-          const totalLength = sentenceEnd + 2 + nextPause + 1;
-          if (totalLength >= MIN_SEGMENT_LENGTH && totalLength <= MAX_SEGMENT_LENGTH) {
-            return remaining.substring(0, totalLength).trim();
-          }
-        }
-        
-        // Just take to next word boundary after minimum
-        if (remaining.length >= IDEAL_SEGMENT_LENGTH) {
-          const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
-          const lastSpace = chunk.lastIndexOf(" ");
-          if (lastSpace > MIN_SEGMENT_LENGTH) {
-            return chunk.substring(0, lastSpace).trim();
-          }
-        }
-      }
-      
-      // Sentence too long but still acceptable
-      if (sentenceEnd > MAX_SEGMENT_LENGTH) {
-        // Split at comma or semicolon within range
-        const pauseEnd = remaining.search(/[,;:]\s/);
-        if (pauseEnd !== -1 && pauseEnd >= MIN_SEGMENT_LENGTH && pauseEnd <= IDEAL_SEGMENT_LENGTH) {
-          return remaining.substring(0, pauseEnd + 1).trim();
-        }
-        
-        // Split at ideal length, word boundary
-        const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
-        const lastSpace = chunk.lastIndexOf(" ");
-        if (lastSpace > MIN_SEGMENT_LENGTH) {
-          return chunk.substring(0, lastSpace).trim();
-        }
-      }
-    }
-
-    // No sentence ending found: look for natural pause points
-    const pauseEnd = remaining.search(/[,;:]\s/);
-    if (pauseEnd !== -1 && pauseEnd >= MIN_SEGMENT_LENGTH && pauseEnd <= IDEAL_SEGMENT_LENGTH) {
-      return remaining.substring(0, pauseEnd + 1).trim();
-    }
-
-    // Create chunks at word boundaries (target: IDEAL_SEGMENT_LENGTH)
-    if (remaining.length >= IDEAL_SEGMENT_LENGTH) {
-      const chunk = remaining.substring(0, IDEAL_SEGMENT_LENGTH);
-      const lastSpace = chunk.lastIndexOf(" ");
-      if (lastSpace > MIN_SEGMENT_LENGTH) {
-        return chunk.substring(0, lastSpace).trim();
-      }
-    }
-
-    // Smaller chunk but still above minimum
-    if (remaining.length >= MIN_SEGMENT_LENGTH) {
-      const chunk = remaining.substring(0, MIN_SEGMENT_LENGTH + 20);
-      const lastSpace = chunk.lastIndexOf(" ");
-      if (lastSpace > MIN_SEGMENT_LENGTH) {
-        return chunk.substring(0, lastSpace).trim();
-      }
-      // Force return minimum length at word boundary
-      const minChunk = remaining.substring(0, MIN_SEGMENT_LENGTH);
-      const lastSpaceMin = minChunk.lastIndexOf(" ");
-      if (lastSpaceMin > 25) {
-        return minChunk.substring(0, lastSpaceMin).trim();
-      }
-    }
-
-    // Final segment: return what's left if it's substantial enough
-    if (remaining.length >= 25) {
-      return remaining.trim();
-    }
-
-    return null;
   }
 
   function cleanupBargeInDetection() {
@@ -978,8 +951,13 @@ export default function VoiceModeUI() {
     activeTurnIdRef.current += 1;
     const myTurn = activeTurnIdRef.current;
     
-    // 2. Stop audio immediately and resume for next turn
+    // 2. Stop audio immediately and cleanup server-side stream
     if (audioPlayerRef.current) {
+      // Close server-side WebSocket session to prevent memory leak and credit waste
+      if (audioPlayerRef.current.streamActive) {
+        await audioPlayerRef.current.endIncrementalStream();
+      }
+      
       audioPlayerRef.current.stop();
       if (audioPlayerRef.current.clear) {
         audioPlayerRef.current.clear();
