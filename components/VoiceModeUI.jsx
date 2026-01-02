@@ -799,6 +799,7 @@ export default function VoiceModeUI() {
   /**
    * Try to start incremental TTS when first sentence is detected
    * This enables MINIMUM LATENCY - audio starts while n8n is still generating
+   * OPTIMIZED: Only sends complete sentences to prevent prosody breaks
    */
   async function tryStartIncrementalTTS(myTurn) {
     // Already started or turn invalidated
@@ -807,31 +808,46 @@ export default function VoiceModeUI() {
     }
 
     const fullText = assistantTextBufferRef.current;
-    const MIN_CHARS_FOR_TTS = 35; // Reduced from 50 to 35 for faster response
+    const MIN_CHARS_FOR_TTS = 90; // Minimum chars before starting TTS
+    const MIN_FIRST_SENTENCE_CHARS = 50; // First sentence must be at least this long
 
     // Look for first complete sentence
     const firstSentenceMatch = fullText.match(/^.+?[.!?]\s/);
     
-    if (firstSentenceMatch && fullText.length >= MIN_CHARS_FOR_TTS) {
+    // BUG FIX: Ensure first sentence is long enough to avoid ElevenLabs timeout
+    if (firstSentenceMatch && fullText.length >= MIN_CHARS_FOR_TTS && firstSentenceMatch[0].length >= MIN_FIRST_SENTENCE_CHARS) {
       const firstSentence = firstSentenceMatch[0];
       
       console.log(`🚀 FAST START: Starting TTS with first sentence (${firstSentence.length} chars)`);
       console.log(`📊 Streaming will continue while n8n generates remaining ${fullText.length - firstSentence.length}+ chars`);
       
-      ttsStreamStartedRef.current = true;
-      lastSentIndexRef.current = firstSentence.length;
       setStatus("speaking");
       
       try {
-        // Start incremental stream with first sentence
+        // BUG FIX: Start incremental stream BEFORE setting flag
         await audioPlayerRef.current.startIncrementalStream(firstSentence.trim());
+        // Only set flag if stream started successfully
+        ttsStreamStartedRef.current = true;
+        lastSentIndexRef.current = firstSentence.length;
         
-        // Send any additional text that's already buffered
+        // OPTIMIZED: Only send additional COMPLETE sentences that are already buffered
         if (fullText.length > lastSentIndexRef.current) {
-          const additionalText = fullText.substring(lastSentIndexRef.current).trim();
-          if (additionalText.length > 0) {
-            await audioPlayerRef.current.sendTextChunk(additionalText);
-            lastSentIndexRef.current = fullText.length;
+          const remainingText = fullText.substring(lastSentIndexRef.current);
+          
+          // Find all complete sentences in remaining text
+          const sentenceRegex = /.+?[.!?]\s/g;
+          let match;
+          let completeSentences = '';
+          
+          while ((match = sentenceRegex.exec(remainingText)) !== null) {
+            completeSentences += match[0];
+          }
+          
+          // Only send if we have complete sentences (prevents 5-char fragments)
+          if (completeSentences.length > 0) {
+            console.log(`📤 Sending additional complete sentences (${completeSentences.length} chars)`);
+            await audioPlayerRef.current.sendTextChunk(completeSentences.trim());
+            lastSentIndexRef.current += completeSentences.length;
           }
         }
       } catch (error) {

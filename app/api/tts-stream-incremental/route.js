@@ -11,29 +11,83 @@ import WebSocket from 'ws';
 const activeSessions = new Map();
 
 // Session timeout configuration
-const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const CLEANUP_INTERVAL_MS = 60 * 1000; // Check every minute
+const SESSION_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes (shorter to prevent ElevenLabs timeout)
+const CLEANUP_INTERVAL_MS = 30 * 1000; // Check every 30 seconds
 
-// Cleanup old sessions periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [sessionId, session] of activeSessions.entries()) {
-    if (now - session.createdAt > SESSION_TIMEOUT_MS) {
-      console.log(`🧹 Cleaning up expired session: ${sessionId}`);
-      try {
-        if (session.ws && session.ws.readyState === 1) {
-          session.ws.close();
+// MEMORY LEAK FIX: Use on-demand cleanup instead of persistent setInterval
+let cleanupTimer = null;
+
+function scheduleCleanup() {
+  // Clear any existing timer
+  if (cleanupTimer) {
+    clearTimeout(cleanupTimer);
+  }
+  
+  // Only schedule cleanup if there are active sessions
+  if (activeSessions.size > 0) {
+    cleanupTimer = setTimeout(() => {
+      const now = Date.now();
+      let hasExpired = false;
+      
+      for (const [sessionId, session] of activeSessions.entries()) {
+        if (now - session.createdAt > SESSION_TIMEOUT_MS) {
+          console.log(`🧹 Cleaning up expired session: ${sessionId}`);
+          hasExpired = true;
+          try {
+            if (session.ws && session.ws.readyState === 1) {
+              session.ws.close();
+            }
+            if (session.writer) {
+              session.writer.close().catch(() => {});
+            }
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+          activeSessions.delete(sessionId);
         }
-        if (session.writer) {
-          session.writer.close().catch(() => {});
-        }
-      } catch (e) {
-        // Ignore cleanup errors
       }
-      activeSessions.delete(sessionId);
+      
+      // Reschedule if there are still active sessions
+      if (activeSessions.size > 0) {
+        scheduleCleanup();
+      } else {
+        cleanupTimer = null;
+      }
+    }, CLEANUP_INTERVAL_MS);
+  } else {
+    cleanupTimer = null;
+  }
+}
+
+// Simple rate limiting (per session ID)
+const requestCounts = new Map();
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_REQUESTS_PER_WINDOW = 100; // Max 100 requests per minute per session
+
+function checkRateLimit(identifier) {
+  const now = Date.now();
+  const record = requestCounts.get(identifier) || { count: 0, windowStart: now };
+  
+  // Reset window if expired
+  if (now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
+    record.count = 0;
+    record.windowStart = now;
+  }
+  
+  record.count++;
+  requestCounts.set(identifier, record);
+  
+  // Cleanup old entries periodically
+  if (requestCounts.size > 1000) {
+    for (const [key, value] of requestCounts.entries()) {
+      if (now - value.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+        requestCounts.delete(key);
+      }
     }
   }
-}, CLEANUP_INTERVAL_MS);
+  
+  return record.count <= MAX_REQUESTS_PER_WINDOW;
+}
 
 export async function POST(request) {
   try {
@@ -48,6 +102,16 @@ export async function POST(request) {
 
     const body = await request.json();
     const { text, sessionId, isFirst, isLast } = body;
+    
+    // RATE LIMITING: Check rate limit
+    const clientId = sessionId || request.headers.get('x-forwarded-for') || 'unknown';
+    if (!checkRateLimit(clientId)) {
+      console.warn(`⚠️ Rate limit exceeded for ${clientId}`);
+      return NextResponse.json(
+        { error: 'Rate limit exceeded. Please try again later.' },
+        { status: 429 }
+      );
+    }
     
     if (!text && !isLast) {
       return NextResponse.json(
@@ -107,10 +171,17 @@ export async function POST(request) {
           }
           
           if (message.isFinal) {
-            console.log(`✅ Session ${newSessionId} completed`);
-            await writer.close();
-            ws.close();
-            activeSessions.delete(newSessionId);
+            // BUG FIX: Only close if we actually requested to end input
+            const sess = activeSessions.get(newSessionId);
+            if (sess?.endingRequested) {
+              console.log(`✅ Session ${newSessionId} fully completed (endingRequested)`);
+              await writer.close();
+              ws.close();
+              activeSessions.delete(newSessionId);
+            } else {
+              // Important: do NOT close the stream here - more chunks may be coming
+              console.log(`ℹ️ isFinal received for chunk, keeping session open: ${newSessionId}`);
+            }
           }
           
           if (message.error) {
@@ -144,13 +215,18 @@ export async function POST(request) {
         activeSessions.delete(newSessionId);
       });
 
-      // Store session with timestamp
+      // Store session with timestamp, cleanup flag, and endingRequested flag
       activeSessions.set(newSessionId, { 
         ws, 
         writer, 
         wsReady: () => wsReady,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        cleanupScheduled: false,
+        endingRequested: false // BUG FIX: Track when client requests end
       });
+      
+      // MEMORY LEAK FIX: Schedule cleanup timer
+      scheduleCleanup();
 
       // Wait for connection
       await new Promise((resolve, reject) => {
@@ -213,10 +289,35 @@ export async function POST(request) {
       console.log(`📝 Appended text to session ${sessionId}: ${text.length} chars`);
     }
 
-    // If this is the last chunk, signal end
+    // BUG FIX: If this is the last chunk, mark endingRequested and signal end
     if (isLast) {
+      session.endingRequested = true; // BUG FIX: Mark that we're ending
       session.ws.send(JSON.stringify({ text: '' }));
-      console.log(`🏁 Sent end signal to session ${sessionId}`);
+      console.log(`🏁 Sent end signal to session ${sessionId} (endingRequested = true)`);
+      
+      // Mark cleanup as scheduled to prevent double cleanup
+      if (!session.cleanupScheduled) {
+        session.cleanupScheduled = true;
+        
+        // Close WebSocket after delay to allow final audio chunks
+        // This is the ONLY cleanup path to prevent race condition
+        setTimeout(() => {
+          if (activeSessions.has(sessionId)) {
+            const sess = activeSessions.get(sessionId);
+            console.log(`🧹 Scheduled cleanup for session ${sessionId}`);
+            try {
+              if (sess.ws && sess.ws.readyState === WebSocket.OPEN) {
+                sess.ws.close();
+              }
+              activeSessions.delete(sessionId);
+              // Reschedule cleanup check
+              scheduleCleanup();
+            } catch (e) {
+              // Ignore
+            }
+          }
+        }, 2000); // Give 2 seconds for final audio chunks
+      }
     }
 
     return NextResponse.json({ 

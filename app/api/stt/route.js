@@ -7,6 +7,36 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
+// Simple rate limiting
+const requestCounts = new Map();
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_REQUESTS_PER_WINDOW = 30; // Max 30 STT requests per minute
+
+function checkRateLimit(identifier) {
+  const now = Date.now();
+  const record = requestCounts.get(identifier) || { count: 0, windowStart: now };
+  
+  // Reset window if expired
+  if (now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
+    record.count = 0;
+    record.windowStart = now;
+  }
+  
+  record.count++;
+  requestCounts.set(identifier, record);
+  
+  // Cleanup old entries periodically
+  if (requestCounts.size > 1000) {
+    for (const [key, value] of requestCounts.entries()) {
+      if (now - value.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+        requestCounts.delete(key);
+      }
+    }
+  }
+  
+  return record.count <= MAX_REQUESTS_PER_WINDOW;
+}
+
 // Common Whisper hallucinations when there's silence or background noise
 const HALLUCINATION_PATTERNS = [
   /^thank you\.?$/i,
@@ -63,6 +93,16 @@ export async function POST(request) {
       return NextResponse.json(
         { error: 'OPENAI_API_KEY not configured' },
         { status: 500 }
+      );
+    }
+
+    // RATE LIMITING: Check rate limit
+    const clientId = request.headers.get('x-forwarded-for') || 'unknown';
+    if (!checkRateLimit(clientId)) {
+      console.warn(`⚠️ STT rate limit exceeded for ${clientId}`);
+      return NextResponse.json(
+        { error: 'Rate limit exceeded. Please try again later.' },
+        { status: 429 }
       );
     }
 
