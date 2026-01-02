@@ -35,6 +35,8 @@ export default function VoiceModeUI() {
   const volumeCheckIntervalRef = useRef(null);
   const hasSpeechDetectedRef = useRef(false);
   const messagesRef = useRef([]);
+  const textUpdateTimerRef = useRef(null);
+  const pendingTextUpdateRef = useRef(false);
   
   // Barge-in / Interruption refs
   const activeTurnIdRef = useRef(0);
@@ -43,11 +45,11 @@ export default function VoiceModeUI() {
   const bargeInCooldownUntilRef = useRef(0);
 
   // Barge-in configuration
-  const BARGE_IN_SPEECH_THRESHOLD = 0.03; // Lowered to match listening threshold
-  const BARGE_IN_TRIGGER_HOLD_MS = 150;   // Reduced for faster response
+  const BARGE_IN_SPEECH_THRESHOLD = 0.04; // Lowered for better detection
+  const BARGE_IN_TRIGGER_HOLD_MS = 250;   // Reduced for faster interruption response
   const BARGE_IN_POLL_INTERVAL = 50;
-  const BARGE_IN_COOLDOWN_MS = 300;       // Reduced cooldown
-  const BARGE_IN_STARTUP_COOLDOWN_MS = 250; // Reduced startup cooldown
+  const BARGE_IN_COOLDOWN_MS = 400;       // Reduced cooldown
+  const BARGE_IN_STARTUP_COOLDOWN_MS = 600; // Reduced startup cooldown
 
   // Sync status to ref
   useEffect(() => {
@@ -592,7 +594,15 @@ export default function VoiceModeUI() {
               setProcessingStage("");
             }
             assistantTextBufferRef.current += newText;
-            setCurrentAssistantText(assistantTextBufferRef.current);
+            
+            // Throttled UI update - only update once per frame
+            if (!pendingTextUpdateRef.current) {
+              pendingTextUpdateRef.current = true;
+              requestAnimationFrame(() => {
+                setCurrentAssistantText(assistantTextBufferRef.current);
+                pendingTextUpdateRef.current = false;
+              });
+            }
             
             // Check if we should start TTS stream (first sentence detected)
             await tryStartIncrementalTTS(myTurn);
@@ -808,13 +818,13 @@ export default function VoiceModeUI() {
     }
 
     const fullText = assistantTextBufferRef.current;
-    const MIN_CHARS_FOR_TTS = 90; // Minimum chars before starting TTS
-    const MIN_FIRST_SENTENCE_CHARS = 50; // First sentence must be at least this long
+    const MIN_CHARS_FOR_TTS = 80; // Lowered to support shorter responses
+    const MIN_FIRST_SENTENCE_CHARS = 50; // Lowered to support shorter responses
 
     // Look for first complete sentence
     const firstSentenceMatch = fullText.match(/^.+?[.!?]\s/);
     
-    // BUG FIX: Ensure first sentence is long enough to avoid ElevenLabs timeout
+    // Start TTS with first sentence if it meets minimum requirements
     if (firstSentenceMatch && fullText.length >= MIN_CHARS_FOR_TTS && firstSentenceMatch[0].length >= MIN_FIRST_SENTENCE_CHARS) {
       const firstSentence = firstSentenceMatch[0];
       
