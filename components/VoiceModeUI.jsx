@@ -820,7 +820,7 @@ export default function VoiceModeUI() {
     }
 
     const fullText = assistantTextBufferRef.current;
-    const MIN_CHARS_FOR_TTS = 80; // Lowered to support shorter responses
+    const MIN_CHARS_FOR_TTS = 100; // Lowered to support shorter responses
     const MIN_FIRST_SENTENCE_CHARS = 50; // Lowered to support shorter responses
 
     // Look for first complete sentence
