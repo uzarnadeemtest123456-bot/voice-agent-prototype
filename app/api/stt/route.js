@@ -25,12 +25,10 @@ function checkRateLimit(identifier) {
   record.count++;
   requestCounts.set(identifier, record);
   
-  // Cleanup old entries periodically
-  if (requestCounts.size > 1000) {
-    for (const [key, value] of requestCounts.entries()) {
-      if (now - value.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
-        requestCounts.delete(key);
-      }
+  // Cleanup expired entries on every request to prevent memory leak
+  for (const [key, value] of requestCounts.entries()) {
+    if (now - value.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+      requestCounts.delete(key);
     }
   }
   
@@ -97,7 +95,11 @@ export async function POST(request) {
     }
 
     // RATE LIMITING: Check rate limit
-    const clientId = request.headers.get('x-forwarded-for') || 'unknown';
+    const clientId =
+      request.headers.get('x-forwarded-for') ||
+      request.headers.get('x-real-ip') ||
+      request.headers.get('user-agent') ||
+      'unknown';
     if (!checkRateLimit(clientId)) {
       console.warn(`⚠️ STT rate limit exceeded for ${clientId}`);
       return NextResponse.json(
@@ -119,8 +121,51 @@ export async function POST(request) {
 
     const openai = new OpenAI({ apiKey });
 
-    // Convert blob to File object for Whisper API
-    const file = new File([audioFile], 'audio.webm', { type: 'audio/webm' });
+    // Detect audio format more robustly
+    const audioType = audioFile.type || '';
+    const origName = audioFile.name || 'audio';
+
+    // Map common mime types to extensions Whisper accepts well
+    const mimeToExt = (mime) => {
+      const m = mime.toLowerCase();
+      if (m.includes('webm')) return 'webm';
+      if (m.includes('ogg')) return 'ogg';
+      if (m.includes('wav')) return 'wav';
+      if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
+      if (m.includes('mp4') || m.includes('m4a') || m.includes('aac') || m.includes('x-m4a')) return 'mp4'; // mp4 container
+      return null;
+    };
+
+    let ext = mimeToExt(audioType);
+
+    // If mime is missing or unhelpful, sniff magic bytes
+    if (!ext) {
+      const buf = Buffer.from(await audioFile.arrayBuffer());
+      // WEBM: 1A 45 DF A3
+      if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) ext = 'webm';
+      // MP4: "ftyp" around offset 4
+      else if (buf.length >= 12 && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) ext = 'mp4';
+      // OGG: "OggS"
+      else if (buf.length >= 4 && buf[0] === 0x4f && buf[1] === 0x67 && buf[2] === 0x67 && buf[3] === 0x53) ext = 'ogg';
+      // WAV: "RIFF"
+      else if (buf.length >= 4 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46) ext = 'wav';
+      else ext = 'webm'; // last resort
+    }
+
+    const fileName = origName.includes('.') ? origName : `audio.${ext}`;
+
+    // Use the incoming mime if present, otherwise pick a sane one
+    const forcedMime =
+      audioType ||
+      (ext === 'mp4' ? 'audio/mp4' :
+       ext === 'ogg' ? 'audio/ogg' :
+       ext === 'wav' ? 'audio/wav' :
+       ext === 'mp3' ? 'audio/mpeg' :
+       'audio/webm');
+
+    console.log(`🎙️ STT processing: ${audioFile.size} bytes, type: ${audioType || '(none)'}, using: ${fileName} (${forcedMime})`);
+
+    const file = new File([audioFile], fileName, { type: forcedMime });
 
     // Transcribe using Whisper with temperature=0 to reduce hallucinations
     const transcription = await openai.audio.transcriptions.create({

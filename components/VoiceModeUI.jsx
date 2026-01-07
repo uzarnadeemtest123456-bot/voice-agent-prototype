@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { getBreathingScale } from "@/lib/audioLevel";
-import { StreamingAudioPlayer } from "@/lib/streamingAudioPlayer";
+import { TextChunker } from "@/lib/textChunker";
+import { AudioQueue } from "@/lib/audioQueue";
 
 export default function VoiceModeUI() {
   // Main status state
@@ -16,12 +17,7 @@ export default function VoiceModeUI() {
   const [displayError, setDisplayError] = useState(null);
 
   const messagesEndRef = useRef(null);
-  const audioPlayerRef = useRef(null);
-  const spokenUpToIndexRef = useRef(0);
   const assistantTextBufferRef = useRef("");
-  const isSpeakingRef = useRef(false);
-  const ttsStreamStartedRef = useRef(false);
-  const lastSentIndexRef = useRef(0);
   const statusRef = useRef("idle");
   const streamRef = useRef(null);
   const analyserRef = useRef(null);
@@ -30,21 +26,25 @@ export default function VoiceModeUI() {
   const volumeCheckIntervalRef = useRef(null);
   const hasSpeechDetectedRef = useRef(false);
   const messagesRef = useRef([]);
-  const textUpdateTimerRef = useRef(null);
   const pendingTextUpdateRef = useRef(false);
   
-  // Barge-in / Interruption refs
+  // Turn tracking for interruption handling
   const activeTurnIdRef = useRef(0);
-  const bargeInIntervalRef = useRef(null);
-  const bargeInStartRef = useRef(null);
-  const bargeInCooldownUntilRef = useRef(0);
 
-  // Barge-in configuration
-  const BARGE_IN_SPEECH_THRESHOLD = 0.04; // Lowered for better detection
-  const BARGE_IN_TRIGGER_HOLD_MS = 250;   // Reduced for faster interruption response
-  const BARGE_IN_POLL_INTERVAL = 50;
-  const BARGE_IN_COOLDOWN_MS = 400;       // Reduced cooldown
-  const BARGE_IN_STARTUP_COOLDOWN_MS = 600; // Reduced startup cooldown
+  // TTS refs
+  const audioQueueRef = useRef(null);
+  const textChunkerRef = useRef(null);
+  const activeRequestIdRef = useRef(0);
+  const currentChunkIdRef = useRef(0);
+  const ttsAbortControllersRef = useRef(new Set());
+  const speakingInterruptCheckRef = useRef(null);
+  const streamingCompleteRef = useRef(false); // Track if n8n stream is complete
+  
+  // Listening lock to prevent double sessions
+  const isStartingListeningRef = useRef(false);
+  
+  // ProcessingStage ref to fix stale closure
+  const processingStageRef = useRef("");
 
   // Custom hooks for modular functionality
   const audioRecorder = useAudioRecorder();
@@ -56,25 +56,10 @@ export default function VoiceModeUI() {
     messagesRef.current = messages;
   }, [messages]);
 
-  // Initialize audio player
+  // Sync processingStage to ref
   useEffect(() => {
-    audioPlayerRef.current = new StreamingAudioPlayer();
-    
-    audioPlayerRef.current.onStart = () => {
-      isSpeakingRef.current = true;
-      // Set cooldown when each audio segment starts to prevent false triggers
-      bargeInCooldownUntilRef.current = Date.now() + BARGE_IN_COOLDOWN_MS;
-    };
-    
-    audioPlayerRef.current.onEnd = () => {
-      isSpeakingRef.current = false;
-      setVolume(0);
-    };
-
-    return () => {
-      cleanup();
-    };
-  }, []);
+    processingStageRef.current = processingStage;
+  }, [processingStage]);
 
   // Auto-scroll messages
   useEffect(() => {
@@ -96,41 +81,234 @@ export default function VoiceModeUI() {
     }
   }, [status]);
 
-  // Process streaming text for TTS
-  // NOTE: We pass the full accumulated text to speakStreaming, but the internal
-  // spokenUpToIndexRef tracks what has already been spoken to avoid duplication.
-  // This allows the segmentation logic to see the full context when extracting segments.
-  useEffect(() => {
-    if (status === "speaking" && isSpeakingRef.current) {
-      let animationId;
-      let phase = 0;
-      const animate = () => {
-        phase += 0.1;
-        const simVolume = Math.abs(Math.sin(phase)) * 0.5 + 0.2;
-        setVolume(simVolume);
-        animationId = requestAnimationFrame(animate);
+  // TTS Functions
+  function initializeTTS(requestId) {
+    console.log(`🎵 Initializing TTS for request ${requestId}`);
+    
+    // Initialize audio queue if not exists
+    if (!audioQueueRef.current) {
+      audioQueueRef.current = new AudioQueue();
+      
+      // Setup callbacks
+      audioQueueRef.current.onPlaybackStart = () => {
+        console.log("🔊 Audio playback started");
+        setStatus("speaking");
+        setupSpeakingInterruptDetection();
       };
-      animate();
-      return () => cancelAnimationFrame(animationId);
-    }
-  }, [status, isSpeakingRef.current]);
-
-  // Barge-in detection: enable when speaking, disable otherwise
-  useEffect(() => {
-    if (status === "speaking") {
-      // Set cooldown to prevent false trigger from AI audio start
-      bargeInCooldownUntilRef.current = Date.now() + BARGE_IN_STARTUP_COOLDOWN_MS;
-      setupBargeInDetection();
-    } else {
-      cleanupBargeInDetection();
+      
+      audioQueueRef.current.onPlaybackComplete = () => {
+        console.log("✅ All audio playback complete");
+        cleanupSpeakingInterruptDetection();
+        
+        // Check if we should return to listening
+        if (statusRef.current === "speaking" && activeTurnIdRef.current === activeRequestIdRef.current) {
+          setStatus("listening");
+          startListening();
+        }
+      };
     }
     
-    return () => {
-      cleanupBargeInDetection();
-    };
-  }, [status]);
+    // Set active request
+    audioQueueRef.current.setActiveRequest(requestId);
+    activeRequestIdRef.current = requestId;
+    currentChunkIdRef.current = 0;
+    
+    // Initialize text chunker
+    textChunkerRef.current = new TextChunker((chunk) => {
+      const chunkId = currentChunkIdRef.current++;
+      fetchTTSAudio(chunk, requestId, chunkId);
+    });
+  }
+
+  async function fetchTTSAudio(text, requestId, chunkId) {
+    // Check if this request is still active
+    if (requestId !== activeRequestIdRef.current) {
+      console.log(`⚠️ Skipping TTS for old request ${requestId}`);
+      return;
+    }
+
+    const abortController = new AbortController();
+    ttsAbortControllersRef.current.add(abortController);
+
+    try {
+      console.log(`🎤 Fetching TTS [req:${requestId}, chunk:${chunkId}]...`);
+      
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: text,
+          requestId: requestId,
+          chunkId: chunkId,
+        }),
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        console.error(`❌ TTS API error: ${response.status}`);
+        return;
+      }
+
+      // Check again after fetch
+      if (requestId !== activeRequestIdRef.current) {
+        console.log(`⚠️ Discarding TTS response from old request ${requestId}`);
+        return;
+      }
+
+      const audioBlob = await response.blob();
+      console.log(`✅ TTS audio received [req:${requestId}, chunk:${chunkId}]: ${audioBlob.size} bytes`);
+
+      // Enqueue audio
+      if (audioQueueRef.current) {
+        audioQueueRef.current.enqueue(requestId, chunkId, audioBlob);
+      }
+
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        console.log(`⚠️ TTS request aborted [req:${requestId}, chunk:${chunkId}]`);
+      } else {
+        console.error(`❌ TTS fetch error [req:${requestId}, chunk:${chunkId}]:`, err);
+      }
+    } finally {
+      ttsAbortControllersRef.current.delete(abortController);
+    }
+  }
+
+  function handleInterruption() {
+    console.log("🛑 Interruption detected!");
+    
+    // Increment request ID to invalidate ongoing TTS
+    activeRequestIdRef.current += 1;
+    activeTurnIdRef.current += 1;
+    
+    // Stop all audio
+    if (audioQueueRef.current) {
+      audioQueueRef.current.stopAll();
+    }
+    
+    // Abort all in-flight TTS requests
+    for (const controller of ttsAbortControllersRef.current) {
+      controller.abort();
+    }
+    ttsAbortControllersRef.current.clear();
+    
+    // Reset text chunker
+    if (textChunkerRef.current) {
+      textChunkerRef.current.reset();
+    }
+    
+    // Cleanup speaking interrupt detection
+    cleanupSpeakingInterruptDetection();
+    
+    // Abort n8n stream
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Clear text buffer
+    assistantTextBufferRef.current = "";
+    setCurrentAssistantText("");
+    setProcessingStage("");
+    
+    // Transition to listening
+    setStatus("listening");
+    startListening();
+  }
+
+  function setupSpeakingInterruptDetection() {
+    if (!analyserRef.current) return;
+    
+    const analyser = analyserRef.current;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    let highVolumeStart = null;
+    const INTERRUPT_THRESHOLD = 0.05; // Higher than normal speech detection
+    const INTERRUPT_DURATION = 150; // 150ms of speech to trigger interrupt
+    
+    speakingInterruptCheckRef.current = setInterval(() => {
+      // Only check when speaking
+      if (statusRef.current !== "speaking") {
+        return;
+      }
+      
+      analyser.getByteTimeDomainData(dataArray);
+      
+      // Calculate RMS volume
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const normalized = (dataArray[i] - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / bufferLength);
+      
+      if (rms > INTERRUPT_THRESHOLD) {
+        if (!highVolumeStart) {
+          highVolumeStart = Date.now();
+        }
+        
+        const duration = Date.now() - highVolumeStart;
+        
+        // Trigger interruption if sustained
+        if (duration >= INTERRUPT_DURATION) {
+          console.log("🎤 User speaking detected during playback - interrupting!");
+          cleanupSpeakingInterruptDetection();
+          handleInterruption();
+        }
+      } else {
+        highVolumeStart = null;
+      }
+    }, 50); // Check every 50ms
+  }
+
+  function cleanupSpeakingInterruptDetection() {
+    if (speakingInterruptCheckRef.current) {
+      clearInterval(speakingInterruptCheckRef.current);
+      speakingInterruptCheckRef.current = null;
+    }
+  }
+
+  function cleanupTTS() {
+    console.log("🧹 Cleaning up TTS");
+    
+    // Stop text chunker
+    if (textChunkerRef.current) {
+      textChunkerRef.current.reset();
+      textChunkerRef.current = null;
+    }
+    
+    // Stop audio queue
+    if (audioQueueRef.current) {
+      audioQueueRef.current.cleanup();
+    }
+    
+    // Abort all TTS requests
+    for (const controller of ttsAbortControllersRef.current) {
+      controller.abort();
+    }
+    ttsAbortControllersRef.current.clear();
+    
+    // Cleanup interrupt detection
+    cleanupSpeakingInterruptDetection();
+  }
 
   async function startListening() {
+    // Prevent double listening sessions
+    if (isStartingListeningRef.current) {
+      console.log("⚠️ Already starting listening, skipping");
+      return;
+    }
+    
+    // Guard against already recording
+    if (mediaRecorderRef.current?.state === "recording") {
+      console.log("⚠️ Already recording, skipping");
+      return;
+    }
+    
+    isStartingListeningRef.current = true;
+    
     try {
       // Reuse existing stream if available (for barge-in to work)
       let stream = streamRef.current;
@@ -152,9 +330,18 @@ export default function VoiceModeUI() {
       audioChunksRef.current = [];
 
       // Create MediaRecorder - works on Firefox, Chrome, Brave, Tor, etc.
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
-      });
+      // Probe for supported mime types with fallback
+      let mimeType;
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mimeType = 'audio/webm;codecs=opus';
+      else if (MediaRecorder.isTypeSupported('audio/webm')) mimeType = 'audio/webm';
+      else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
+
+      let mediaRecorder;
+      try {
+        mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      } catch {
+        mediaRecorder = new MediaRecorder(stream); // last resort - use browser default
+      }
       
       mediaRecorderRef.current = mediaRecorder;
 
@@ -185,6 +372,8 @@ export default function VoiceModeUI() {
       console.error("Error accessing microphone:", err);
       setError("Could not access microphone. Please grant permission.");
       setStatus("error");
+    } finally {
+      isStartingListeningRef.current = false;
     }
   }
 
@@ -370,7 +559,17 @@ export default function VoiceModeUI() {
     try {
       // Call Whisper API for transcription
       const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.webm');
+      
+      // Choose extension based on actual blob type
+      const mime = audioBlob.type || 'audio/webm';
+      const ext =
+        mime.includes('mp4') ? 'mp4' :
+        mime.includes('mpeg') ? 'mp3' :
+        mime.includes('ogg') ? 'ogg' :
+        mime.includes('wav') ? 'wav' :
+        'webm';
+      
+      formData.append('audio', audioBlob, `recording.${ext}`);
 
       console.log("🎙️ Sending to STT API...");
       
@@ -465,14 +664,6 @@ export default function VoiceModeUI() {
     setStatus("thinking");
     setCurrentAssistantText("");
     assistantTextBufferRef.current = "";
-    spokenUpToIndexRef.current = 0;
-    ttsStreamStartedRef.current = false;
-    lastSentIndexRef.current = 0;
-    
-    // Clear any leftover audio segments from previous turn
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.clear();
-    }
 
     try {
       // Send query directly to n8n (Whisper handles transcription accurately)
@@ -500,6 +691,9 @@ export default function VoiceModeUI() {
       if (!webhookUrl) {
         throw new Error("N8N_BRAIN_WEBHOOK_URL not configured");
       }
+
+      // Initialize TTS for this request
+      initializeTTS(myTurn);
 
       abortControllerRef.current = new AbortController();
 
@@ -557,8 +751,7 @@ export default function VoiceModeUI() {
     const streamTimeout = setTimeout(() => {
       if (activeTurnIdRef.current === myTurn) {
         console.error("⏱️ SSE stream timeout - aborting");
-        reader.cancel();
-        throw new Error("Stream timeout - no response from n8n");
+        abortControllerRef.current?.abort();
       }
     }, 30000);
 
@@ -590,11 +783,16 @@ export default function VoiceModeUI() {
           
           if (event.event === "delta" && event.data?.text) {
             const newText = event.data.text;
-            // Clear processing stage on first text chunk
-            if (processingStage) {
+            // Clear processing stage on first text chunk (use ref to avoid stale closure)
+            if (processingStageRef.current) {
               setProcessingStage("");
             }
             assistantTextBufferRef.current += newText;
+            
+            // Feed text to TTS chunker
+            if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
+              textChunkerRef.current.add(newText);
+            }
             
             // Throttled UI update - only update once per frame
             if (!pendingTextUpdateRef.current) {
@@ -604,11 +802,12 @@ export default function VoiceModeUI() {
                 pendingTextUpdateRef.current = false;
               });
             }
-            
-            // Check if we should start TTS stream (first sentence detected)
-            await tryStartIncrementalTTS(myTurn);
           } else if (event.event === "done") {
             clearTimeout(streamTimeout);
+            // End text chunker
+            if (textChunkerRef.current) {
+              textChunkerRef.current.end();
+            }
             await finishAssistantResponse(myTurn);
             return;
           } else if (event.event === "error") {
@@ -686,18 +885,18 @@ export default function VoiceModeUI() {
                 // Content is regular text
               }
               
-              // Clear processing stage on first text chunk
-              if (processingStage) {
+              // Clear processing stage on first text chunk (use ref to avoid stale closure)
+              if (processingStageRef.current) {
                 setProcessingStage("");
               }
               assistantTextBufferRef.current += jsonObj.content;
+              
+              // Feed text to TTS chunker
+              if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
+                textChunkerRef.current.add(jsonObj.content);
+              }
+              
               setCurrentAssistantText(assistantTextBufferRef.current);
-              
-              // Check if we should start TTS stream (first sentence detected)
-              await tryStartIncrementalTTS(myTurn);
-              
-              // If stream is active, send new chunks
-              await sendIncrementalTextChunks(myTurn);
             }
           } catch (parseError) {
             console.error("Error parsing JSON line:", parseError);
@@ -710,11 +909,22 @@ export default function VoiceModeUI() {
           const jsonObj = JSON.parse(buffer);
           if (jsonObj.type === "item" && jsonObj.content) {
             assistantTextBufferRef.current += jsonObj.content;
+            
+            // Feed text to TTS chunker
+            if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
+              textChunkerRef.current.add(jsonObj.content);
+            }
+            
             setCurrentAssistantText(assistantTextBufferRef.current);
           }
         } catch (e) {
           // Ignore
         }
+      }
+
+      // End text chunker
+      if (textChunkerRef.current) {
+        textChunkerRef.current.end();
       }
 
       await finishAssistantResponse(myTurn);
@@ -737,49 +947,9 @@ export default function VoiceModeUI() {
     
     const fullText = assistantTextBufferRef.current.trim();
     
+    // Add final message to chat history
     if (fullText.length > 0) {
-      setStatus("speaking");
-      
-      try {
-        // If incremental streaming was started, send remaining text and end stream
-        if (ttsStreamStartedRef.current) {
-          console.log(`📊 Incremental TTS active - sending remaining text and closing stream`);
-          
-          // Send any remaining text
-          if (lastSentIndexRef.current < fullText.length) {
-            const remainingText = fullText.substring(lastSentIndexRef.current).trim();
-            if (remainingText.length > 0) {
-              console.log(`📤 Sending final text chunk (${remainingText.length} chars)`);
-              await audioPlayerRef.current.sendTextChunk(remainingText);
-            }
-          }
-          
-          // Signal end of stream
-          await audioPlayerRef.current.endIncrementalStream();
-          console.log('✅ Incremental TTS stream completed');
-          
-        } else {
-          // Fallback: response was too short, use regular streaming
-          console.log(`🎤 Response too short for incremental - using regular streaming (${fullText.length} chars)`);
-          await audioPlayerRef.current.streamText(fullText);
-        }
-      } catch (error) {
-        console.error('Error streaming TTS:', error);
-      }
-    }
-    
-    // Wait for all TTS to complete
-    await ttsPlayer.waitForPlaybackComplete();
-
-    // Check AGAIN after waiting - could have been interrupted while waiting
-    if (myTurn && activeTurnIdRef.current !== myTurn) {
-      console.log("⚠️ finishAssistantResponse abandoned after playback (interrupted)");
-      return;
-    }
-
-    // Add final message
-    if (assistantTextBufferRef.current) {
-      setMessages((prev) => [...prev, { role: "assistant", text: assistantTextBufferRef.current }]);
+      setMessages((prev) => [...prev, { role: "assistant", text: fullText }]);
     }
 
     setCurrentAssistantText("");
@@ -787,254 +957,40 @@ export default function VoiceModeUI() {
     setProcessingStage("");
     setVolume(0);
     
-    // OPTIMIZATION: Reduced from 500ms to 150ms for faster turn-around (saves 350ms!)
-    // Short delay to avoid echo pickup while keeping response snappy
-    await new Promise(resolve => setTimeout(resolve, 150));
+    // Check if audio queue has pending audio to play
+    const hasAudioToPlay = audioQueueRef.current && 
+                           (audioQueueRef.current.isPlaying() || audioQueueRef.current.getQueueSize() > 0);
     
-    // Final check before starting new recording
-    if (myTurn && activeTurnIdRef.current !== myTurn) {
-      console.log("⚠️ finishAssistantResponse skipping startListening (interrupted)");
-      return;
-    }
-    
-    // Auto-restart listening for next turn
-    setStatus("listening");
-    
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.resume();
-    }
-    
-    await startListening();
-    console.log("Ready for next turn");
-  }
-
-  /**
-   * Try to start incremental TTS when first sentence is detected
-   * This enables MINIMUM LATENCY - audio starts while n8n is still generating
-   * OPTIMIZED: Only sends complete sentences to prevent prosody breaks
-   */
-  async function tryStartIncrementalTTS(myTurn) {
-    // Already started or turn invalidated
-    if (ttsStreamStartedRef.current || activeTurnIdRef.current !== myTurn) {
-      return;
-    }
-
-    const fullText = assistantTextBufferRef.current;
-    const MIN_CHARS_FOR_TTS = 100; // Lowered to support shorter responses
-    const MIN_FIRST_SENTENCE_CHARS = 50; // Lowered to support shorter responses
-
-    // Look for first complete sentence
-    const firstSentenceMatch = fullText.match(/^.+?[.!?]\s/);
-    
-    // Start TTS with first sentence if it meets minimum requirements
-    if (firstSentenceMatch && fullText.length >= MIN_CHARS_FOR_TTS && firstSentenceMatch[0].length >= MIN_FIRST_SENTENCE_CHARS) {
-      const firstSentence = firstSentenceMatch[0];
+    if (hasAudioToPlay) {
+      console.log("📢 Audio playback pending, waiting for completion...");
+      // Audio will play, and onPlaybackComplete callback will handle returning to listening
+      // Don't transition to listening here - let the audio play
+    } else {
+      // No audio to play, return to listening immediately
+      console.log("✅ No audio to play, returning to listening");
       
-      console.log(`🚀 FAST START: Starting TTS with first sentence (${firstSentence.length} chars)`);
-      console.log(`📊 Streaming will continue while n8n generates remaining ${fullText.length - firstSentence.length}+ chars`);
-      
-      setStatus("speaking");
-      
-      try {
-        // BUG FIX: Start incremental stream BEFORE setting flag
-        await audioPlayerRef.current.startIncrementalStream(firstSentence.trim());
-        // Only set flag if stream started successfully
-        ttsStreamStartedRef.current = true;
-        lastSentIndexRef.current = firstSentence.length;
-        
-        // OPTIMIZED: Only send additional COMPLETE sentences that are already buffered
-        if (fullText.length > lastSentIndexRef.current) {
-          const remainingText = fullText.substring(lastSentIndexRef.current);
-          
-          // Find all complete sentences in remaining text
-          const sentenceRegex = /.+?[.!?]\s/g;
-          let match;
-          let completeSentences = '';
-          
-          while ((match = sentenceRegex.exec(remainingText)) !== null) {
-            completeSentences += match[0];
-          }
-          
-          // Only send if we have complete sentences (prevents 5-char fragments)
-          if (completeSentences.length > 0) {
-            console.log(`📤 Sending additional complete sentences (${completeSentences.length} chars)`);
-            await audioPlayerRef.current.sendTextChunk(completeSentences.trim());
-            lastSentIndexRef.current += completeSentences.length;
-          }
-        }
-      } catch (error) {
-        console.error('Error starting incremental TTS:', error);
-        ttsStreamStartedRef.current = false;
-      }
-    }
-  }
-
-  /**
-   * Send new text chunks to active TTS stream
-   */
-  async function sendIncrementalTextChunks(myTurn) {
-    if (!ttsStreamStartedRef.current || activeTurnIdRef.current !== myTurn) {
-      return;
-    }
-
-    const fullText = assistantTextBufferRef.current;
-    const lastSent = lastSentIndexRef.current;
-
-    if (lastSent >= fullText.length) {
-      return;
-    }
-
-    const newText = fullText.substring(lastSent);
-    
-    // Send complete sentences as they arrive
-    const sentenceMatch = newText.match(/^.+?[.!?]\s/);
-    if (sentenceMatch) {
-      const sentence = sentenceMatch[0];
-      console.log(`📤 Sending next sentence to TTS (${sentence.length} chars)`);
-      
-      try {
-        await audioPlayerRef.current.sendTextChunk(sentence.trim());
-        lastSentIndexRef.current += sentence.length;
-      } catch (error) {
-        console.error('Error sending text chunk:', error);
-      }
-    }
-  }
-
-  async function waitForPlaybackComplete() {
-    while (audioPlayerRef.current.isProcessing || isSpeakingRef.current) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-
-  function cleanupBargeInDetection() {
-    if (bargeInIntervalRef.current) {
-      clearInterval(bargeInIntervalRef.current);
-      bargeInIntervalRef.current = null;
-    }
-    bargeInStartRef.current = null;
-  }
-
-  function setupBargeInDetection() {
-    if (!analyserRef.current) {
-      console.log("⚠️ Barge-in setup failed: No analyser available");
-      return;
-    }
-    
-    console.log("✅ Barge-in detection STARTED");
-    
-    const analyser = analyserRef.current;
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    bargeInIntervalRef.current = setInterval(() => {
-      // Only detect during speaking state
-      if (statusRef.current !== "speaking") {
+      // Check again before starting new recording
+      if (myTurn && activeTurnIdRef.current !== myTurn) {
+        console.log("⚠️ finishAssistantResponse skipping startListening (interrupted)");
         return;
       }
-
-      // Check cooldown
-      const now = Date.now();
-      if (now < bargeInCooldownUntilRef.current) {
-        return;
-      }
-
-      analyser.getByteTimeDomainData(dataArray);
-
-      // Calculate RMS
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const normalized = (dataArray[i] - 128) / 128;
-        sum += normalized * normalized;
-      }
-      const rms = Math.sqrt(sum / bufferLength);
-
-      // Check if speech detected
-      if (rms > BARGE_IN_SPEECH_THRESHOLD) {
-        if (!bargeInStartRef.current) {
-          bargeInStartRef.current = now;
-          console.log(`🎤 Speech detected! RMS: ${rms.toFixed(4)}`);
-        }
-
-        const holdDuration = now - bargeInStartRef.current;
-
-        // Trigger interruption if held long enough
-        if (holdDuration >= BARGE_IN_TRIGGER_HOLD_MS) {
-          console.log(`🛑 Barge-in triggered after ${holdDuration}ms! Interrupting AI...`);
-          bargeInStartRef.current = null;
-          interruptAndStartListening();
-        }
-      } else {
-        if (bargeInStartRef.current) {
-          bargeInStartRef.current = null;
-        }
-      }
-    }, BARGE_IN_POLL_INTERVAL);
-  }
-
-  async function interruptAndStartListening() {
-    console.log("🛑 INTERRUPTION TRIGGERED");
-    
-    // 1. Invalidate old turn
-    activeTurnIdRef.current += 1;
-    const myTurn = activeTurnIdRef.current;
-    
-    // 2. Stop audio immediately and cleanup server-side stream
-    if (audioPlayerRef.current) {
-      // Close server-side WebSocket session to prevent memory leak and credit waste
-      if (audioPlayerRef.current.streamActive) {
-        await audioPlayerRef.current.endIncrementalStream();
-      }
       
-      audioPlayerRef.current.stop();
-      if (audioPlayerRef.current.clear) {
-        audioPlayerRef.current.clear();
-      }
-      // IMPORTANT: Resume to allow next turn's audio to play
-      audioPlayerRef.current.resume();
+      setStatus("listening");
+      await startListening();
+      console.log("Ready for next turn");
     }
-    
-    // 3. Abort n8n request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    
-    // 4. Optional: Save partial assistant text to messages
-    if (assistantTextBufferRef.current) {
-      setMessages(prev => [...prev, { 
-        role: "assistant", 
-        text: assistantTextBufferRef.current + " [interrupted]" 
-      }]);
-    }
-    
-    // 5. Clear streaming buffers
-    assistantTextBufferRef.current = "";
-    setCurrentAssistantText("");
-    spokenUpToIndexRef.current = 0;
-    setProcessingStage("");
-    
-    // 6. Switch to listening
-    setStatus("listening");
-    cleanupBargeInDetection();
-    
-    // Race-guard
-    if (activeTurnIdRef.current !== myTurn) return;
-    
-    // 7. Start recording new input
-    await startListening();
   }
 
   function cleanup() {
     cleanupVoiceActivityDetection();
-    cleanupBargeInDetection();
+    cleanupTTS();
     
     // Stop MediaRecorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
     }
     
-    // NOW stop the mic stream (only on full cleanup)
+    // Stop the mic stream (only on full cleanup)
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
@@ -1053,13 +1009,7 @@ export default function VoiceModeUI() {
       abortControllerRef.current = null;
     }
 
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.cleanup();
-    }
-
-    spokenUpToIndexRef.current = 0;
     assistantTextBufferRef.current = "";
-    isSpeakingRef.current = false;
     audioChunksRef.current = [];
   }
 
@@ -1099,7 +1049,7 @@ export default function VoiceModeUI() {
           <div className="text-center space-y-2">
             <h1 className="text-4xl font-bold text-white">Voice Mode</h1>
             <p className="text-gray-400">{getStatusText()}</p>
-            <p className="text-xs text-gray-500">Universal: Whisper STT + n8n + MiniMax TTS</p>
+            <p className="text-xs text-gray-500">Whisper STT + ElevenLabs TTS + n8n Streaming</p>
           </div>
 
           {/* Error Display */}
@@ -1185,7 +1135,7 @@ export default function VoiceModeUI() {
               <p className="text-base font-semibold text-gray-300">Click Start and speak naturally!</p>
               <p className="text-sm text-green-400">✓ Auto-detects when you stop speaking (0.7s silence)</p>
               <p className="text-xs text-gray-400">No need to press any button - just stop talking!</p>
-              <p className="text-xs mt-2 text-gray-600">Whisper STT + MiniMax TTS + n8n Intelligence</p>
+              <p className="text-xs mt-2 text-gray-600">Whisper STT + n8n Intelligence</p>
             </div>
           )}
         </div>
