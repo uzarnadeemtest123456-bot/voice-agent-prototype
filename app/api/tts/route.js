@@ -35,10 +35,10 @@ export async function POST(request) {
       );
     }
 
-    console.log(`🎤 TTS Request [req:${requestId}, chunk:${chunkId}]: "${text.substring(0, 50)}..."`);
+    console.log(`🎤 TTS Streaming Request [req:${requestId}, chunk:${chunkId}]: "${text.substring(0, 50)}..."`);
 
-    // Call ElevenLabs TTS API
-    const elevenLabsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+    // Use ElevenLabs STREAMING endpoint for lower latency
+    const elevenLabsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`;
     
     const elevenLabsResponse = await fetch(elevenLabsUrl, {
       method: 'POST',
@@ -49,7 +49,7 @@ export async function POST(request) {
       },
       body: JSON.stringify({
         text: text,
-        model_id: 'eleven_monolingual_v1',
+        model_id: 'eleven_flash_v2',
         voice_settings: {
           stability: 0.5,
           similarity_boost: 0.75,
@@ -57,25 +57,24 @@ export async function POST(request) {
           use_speaker_boost: true
         }
       }),
-      // Forward abort signal from client
       signal: request.signal,
     });
 
     if (!elevenLabsResponse.ok) {
       const errorText = await elevenLabsResponse.text();
-      console.error('❌ ElevenLabs API error:', errorText);
+      console.error('❌ ElevenLabs streaming API error:', errorText);
       return NextResponse.json(
-        { error: 'ElevenLabs TTS failed', details: errorText },
+        { error: 'ElevenLabs TTS streaming failed', details: errorText },
         { status: elevenLabsResponse.status }
       );
     }
 
-    // Get audio bytes
-    const audioBuffer = await elevenLabsResponse.arrayBuffer();
-    console.log(`✅ TTS Response [req:${requestId}, chunk:${chunkId}]: ${audioBuffer.byteLength} bytes`);
+    // Stream the audio chunks directly to frontend (lower latency!)
+    // This allows frontend to start downloading as soon as ElevenLabs starts generating
+    console.log(`✅ TTS Stream started [req:${requestId}, chunk:${chunkId}]`);
 
-    // Return complete audio file with proper headers
-    return new NextResponse(audioBuffer, {
+    // Return streaming response
+    return new NextResponse(elevenLabsResponse.body, {
       status: 200,
       headers: {
         'Content-Type': 'audio/mpeg',
