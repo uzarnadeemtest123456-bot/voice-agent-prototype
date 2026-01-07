@@ -131,7 +131,7 @@ export default function VoiceModeUI() {
     ttsAbortControllersRef.current.add(abortController);
 
     try {
-      console.log(`🎤 Fetching TTS [req:${requestId}, chunk:${chunkId}]...`);
+      console.log(`🎤 Fetching TTS Stream [req:${requestId}, chunk:${chunkId}]...`);
       
       const response = await fetch('/api/tts', {
         method: 'POST',
@@ -157,8 +157,30 @@ export default function VoiceModeUI() {
         return;
       }
 
-      const audioBlob = await response.blob();
-      console.log(`✅ TTS audio received [req:${requestId}, chunk:${chunkId}]: ${audioBlob.size} bytes`);
+      // Stream the response and accumulate chunks for Safari compatibility
+      // This starts downloading immediately as ElevenLabs generates audio
+      const reader = response.body.getReader();
+      const chunks = [];
+      let totalBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) break;
+        
+        chunks.push(value);
+        totalBytes += value.length;
+        
+        // Check if request still active during streaming
+        if (requestId !== activeRequestIdRef.current) {
+          console.log(`⚠️ Discarding TTS stream from old request ${requestId}`);
+          return;
+        }
+      }
+
+      // Create complete blob from accumulated chunks (Safari-safe)
+      const audioBlob = new Blob(chunks, { type: 'audio/mpeg' });
+      console.log(`✅ TTS audio stream complete [req:${requestId}, chunk:${chunkId}]: ${audioBlob.size} bytes`);
 
       // Enqueue audio
       if (audioQueueRef.current) {
