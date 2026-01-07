@@ -45,6 +45,9 @@ export default function VoiceModeUI() {
   
   // ProcessingStage ref to fix stale closure
   const processingStageRef = useRef("");
+  
+  // Safari audio unlock tracking
+  const audioContextUnlockRef = useRef(false);
 
   // Custom hooks for modular functionality
   const audioRecorder = useAudioRecorder();
@@ -314,6 +317,48 @@ export default function VoiceModeUI() {
     
     // Cleanup interrupt detection
     cleanupSpeakingInterruptDetection();
+  }
+
+  /**
+   * Unlock Safari audio playback using Web Audio API
+   * Safari blocks autoplay unless triggered by user interaction
+   * This must be called on a direct user gesture (button click)
+   */
+  async function unlockSafariAudio() {
+    // Only unlock once per session
+    if (audioContextUnlockRef.current) {
+      console.log('🔊 Safari audio already unlocked');
+      return;
+    }
+    
+    try {
+      // Create a temporary AudioContext
+      const tempAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+      
+      // Create a silent audio buffer (1 sample)
+      const buffer = tempAudioContext.createBuffer(1, 1, 22050);
+      const source = tempAudioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(tempAudioContext.destination);
+      
+      // Play the silent audio
+      source.start(0);
+      
+      // Wait a tiny bit for the audio to "play"
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      // Close the temporary context
+      await tempAudioContext.close();
+      
+      // Mark as unlocked
+      audioContextUnlockRef.current = true;
+      console.log('✅ Safari audio unlocked via AudioContext');
+      
+    } catch (err) {
+      console.log('⚠️ AudioContext unlock attempt (normal on some devices):', err.message);
+      // Still mark as attempted to avoid repeated tries
+      audioContextUnlockRef.current = true;
+    }
   }
 
   async function startListening() {
@@ -659,33 +704,10 @@ export default function VoiceModeUI() {
       setDisplayError(null);
       setStatus("listening");
       
-      // 🔑 UNLOCK SAFARI AUDIO - Play silent audio on user gesture
+      // 🔑 UNLOCK SAFARI AUDIO - Use AudioContext approach
       // Safari blocks autoplay unless triggered by direct user interaction
-      // This "primes" the audio element to allow future playback
-      if (audioQueueRef.current && audioQueueRef.current.audio) {
-        try {
-          const audio = audioQueueRef.current.audio;
-          
-          // Store original volume
-          const originalVolume = audio.volume;
-          
-          // Set to silent and play tiny silent MP3
-          audio.volume = 0;
-          audio.src = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAQKAAAAAAAAA4RWDu/XAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//sQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//sQZBQP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAEVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV';
-          
-          await audio.play();
-          audio.pause();
-          audio.currentTime = 0;
-          
-          // Restore volume
-          audio.volume = originalVolume;
-          
-          console.log('✅ Safari audio unlocked successfully');
-        } catch (unlockErr) {
-          // Some browsers might reject this, but it's not critical
-          console.log('⚠️ Audio unlock attempt (this is normal on some devices):', unlockErr.message);
-        }
-      }
+      // This unlocks audio playback for the entire session
+      await unlockSafariAudio();
       
       setMessages([]);
       assistantStream.reset();
