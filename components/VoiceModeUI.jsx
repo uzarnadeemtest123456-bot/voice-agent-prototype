@@ -13,8 +13,9 @@ export default function VoiceModeUI() {
   const [volume, setVolume] = useState(0);
   const [error, setError] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [displayVolume, setDisplayVolume] = useState(0);
-  const [displayError, setDisplayError] = useState(null);
+  const [currentAssistantText, setCurrentAssistantText] = useState("");
+  const [userTranscript, setUserTranscript] = useState("");
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
 
   const messagesEndRef = useRef(null);
   const assistantTextBufferRef = useRef("");
@@ -22,6 +23,8 @@ export default function VoiceModeUI() {
   const streamRef = useRef(null);
   const analyserRef = useRef(null);
   const audioContextRef = useRef(null);
+  const micSourceRef = useRef(null);
+  const micAnalyserConnectedRef = useRef(false);
   const silenceStartRef = useRef(null);
   const volumeCheckIntervalRef = useRef(null);
   const hasSpeechDetectedRef = useRef(false);
@@ -38,7 +41,6 @@ export default function VoiceModeUI() {
   const currentChunkIdRef = useRef(0);
   const ttsAbortControllersRef = useRef(new Set());
   const speakingInterruptCheckRef = useRef(null);
-  const streamingCompleteRef = useRef(false); // Track if n8n stream is complete
   
   // Listening lock to prevent double sessions
   const isStartingListeningRef = useRef(false);
@@ -69,6 +71,15 @@ export default function VoiceModeUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, assistantStream.assistantText]);
 
+  // Cleanup on unmount/navigation
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+    // Intentional: run only on unmount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   // Breathing animation for idle state
   useEffect(() => {
@@ -85,10 +96,7 @@ export default function VoiceModeUI() {
   }, [status]);
 
   // TTS Functions
-  function initializeTTS(requestId) {
-    console.log(`🎵 Initializing TTS for request ${requestId}`);
-    
-    // Initialize audio queue if not exists
+  function ensureAudioQueue() {
     if (!audioQueueRef.current) {
       audioQueueRef.current = new AudioQueue();
       
@@ -109,7 +117,21 @@ export default function VoiceModeUI() {
           startListening();
         }
       };
+
+      audioQueueRef.current.onAutoplayBlocked = () => {
+        console.warn("⚠️ Autoplay blocked by browser");
+        setNeedsAudioUnlock(true);
+      };
     }
+
+    return audioQueueRef.current;
+  }
+
+  function initializeTTS(requestId) {
+    console.log(`🎵 Initializing TTS for request ${requestId}`);
+    
+    // Initialize audio queue if not exists
+    ensureAudioQueue();
     
     // Set active request
     audioQueueRef.current.setActiveRequest(requestId);
@@ -160,14 +182,42 @@ export default function VoiceModeUI() {
         return;
       }
 
-      // Stream the response and accumulate chunks for Safari compatibility
-      // This starts downloading immediately as ElevenLabs generates audio
-      const reader = response.body.getReader();
+      // Prefer streaming playback via MediaSource when supported (lower latency)
+      const reader = response.body?.getReader ? response.body.getReader() : null;
+      const canStream =
+        !!reader &&
+        typeof window !== "undefined" &&
+        window.MediaSource &&
+        MediaSource.isTypeSupported("audio/mpeg");
+
+      if (canStream && audioQueueRef.current) {
+        const queued = audioQueueRef.current.enqueueStream(
+          requestId,
+          chunkId,
+          reader,
+          "audio/mpeg"
+        );
+        if (queued) {
+          console.log(`🚰 Streaming TTS audio [req:${requestId}, chunk:${chunkId}] for immediate playback`);
+          return;
+        }
+      }
+
+      // Fallback: accumulate full blob (Safari-safe)
+      const streamReader = reader ?? response.body?.getReader?.();
+      if (!streamReader) {
+        console.warn("⚠️ Response stream not readable, falling back to blob()");
+        const audioBlob = await response.blob();
+        if (audioQueueRef.current) {
+          audioQueueRef.current.enqueue(requestId, chunkId, audioBlob);
+        }
+        return;
+      }
       const chunks = [];
       let totalBytes = 0;
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await streamReader.read();
         
         if (done) break;
         
@@ -243,15 +293,20 @@ export default function VoiceModeUI() {
   }
 
   function setupSpeakingInterruptDetection() {
-    if (!analyserRef.current) return;
-    
-    const analyser = analyserRef.current;
+    cleanupSpeakingInterruptDetection();
+    const analyser = ensureAnalyserStream(streamRef.current);
+    if (!analyser) {
+      console.warn("No analyser available for speaking interrupt detection");
+      return;
+    }
+
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     
     let highVolumeStart = null;
-    const INTERRUPT_THRESHOLD = 0.05; // Higher than normal speech detection
+    let ambientRms = 0;
     const INTERRUPT_DURATION = 150; // 150ms of speech to trigger interrupt
+    const AMBIENT_SMOOTHING = 0.2;
     
     speakingInterruptCheckRef.current = setInterval(() => {
       // Only check when speaking
@@ -269,7 +324,13 @@ export default function VoiceModeUI() {
       }
       const rms = Math.sqrt(sum / bufferLength);
       
-      if (rms > INTERRUPT_THRESHOLD) {
+      // Track ambient noise floor and adapt threshold (Chrome suppression can lower RMS)
+      ambientRms = ambientRms === 0
+        ? rms
+        : ambientRms * (1 - AMBIENT_SMOOTHING) + rms * AMBIENT_SMOOTHING;
+      const dynamicThreshold = Math.max(ambientRms + 0.015, 0.02);
+      
+      if (rms > dynamicThreshold) {
         if (!highVolumeStart) {
           highVolumeStart = Date.now();
         }
@@ -361,6 +422,45 @@ export default function VoiceModeUI() {
     }
   }
 
+  function ensureAnalyserStream(stream) {
+    if (!stream || !stream.active) return null;
+
+    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      micAnalyserConnectedRef.current = false;
+    }
+
+    if (audioContextRef.current.state === "suspended") {
+      audioContextRef.current.resume().catch((err) => {
+        console.warn("Could not resume audio context for analyser:", err);
+      });
+    }
+
+    if (!analyserRef.current) {
+      const analyser = audioContextRef.current.createAnalyser();
+      analyser.fftSize = 2048;
+      analyserRef.current = analyser;
+      micAnalyserConnectedRef.current = false;
+    }
+
+    if (!micSourceRef.current || micSourceRef.current.mediaStream !== stream) {
+      try {
+        micSourceRef.current?.disconnect();
+      } catch (err) {
+        console.warn("Could not disconnect previous mic source:", err);
+      }
+      micSourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
+      micAnalyserConnectedRef.current = false;
+    }
+
+    if (!micAnalyserConnectedRef.current && micSourceRef.current && analyserRef.current) {
+      micSourceRef.current.connect(analyserRef.current);
+      micAnalyserConnectedRef.current = true;
+    }
+
+    return analyserRef.current;
+  }
+
   async function startListening() {
     // Prevent double listening sessions
     if (isStartingListeningRef.current) {
@@ -392,6 +492,15 @@ export default function VoiceModeUI() {
           } 
         });
         streamRef.current = stream;
+      }
+      
+      // Resume audio context if Safari has suspended it
+      if (audioContextRef.current?.state === 'suspended') {
+        try {
+          await audioContextRef.current.resume();
+        } catch (e) {
+          console.warn("Could not resume audio context:", e);
+        }
       }
       
       audioChunksRef.current = [];
@@ -445,16 +554,11 @@ export default function VoiceModeUI() {
   }
 
   function setupVoiceActivityDetection(stream) {
-    // Create AudioContext for volume analysis
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    audioContextRef.current = audioContext;
-
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    analyserRef.current = analyser;
-
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
+    const analyser = ensureAnalyserStream(stream);
+    if (!analyser) {
+      console.warn("No analyser available for VAD");
+      return;
+    }
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
@@ -507,10 +611,9 @@ export default function VoiceModeUI() {
   }
 
   function setupListeningVAD() {
-    // Reuse existing analyser for listening VAD (for barge-in support)
-    if (!analyserRef.current) return;
+    const analyser = ensureAnalyserStream(streamRef.current);
+    if (!analyser) return;
     
-    const analyser = analyserRef.current;
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     
@@ -701,13 +804,19 @@ export default function VoiceModeUI() {
 
   async function startVoiceMode() {
     try {
-      setDisplayError(null);
+      setError(null);
+      setNeedsAudioUnlock(false);
       setStatus("listening");
       
       // 🔑 UNLOCK SAFARI AUDIO - Use AudioContext approach
       // Safari blocks autoplay unless triggered by direct user interaction
       // This unlocks audio playback for the entire session
       await unlockSafariAudio();
+      
+      // Prime the actual audio element for Safari autoplay rules
+      const queue = ensureAudioQueue();
+      await queue.prime();
+      setNeedsAudioUnlock(false);
       
       setMessages([]);
       assistantStream.reset();
@@ -726,6 +835,29 @@ export default function VoiceModeUI() {
     } catch (err) {
       setDisplayError(`Error: ${err.message}`);
       setStatus("error");
+      setNeedsAudioUnlock(true);
+    }
+  }
+
+  async function handleAudioUnlockRetry() {
+    try {
+      const queue = ensureAudioQueue();
+      await queue.prime();
+      if (audioContextRef.current?.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+      setNeedsAudioUnlock(false);
+      
+      // If we were idle due to block, re-enter listening
+      if (statusRef.current === "idle") {
+        setStatus("listening");
+        await startListening();
+      } else {
+        queue.drainQueue();
+      }
+    } catch (err) {
+      console.error("Retry audio unlock failed:", err);
+      setError("Please tap Allow Audio to continue.");
     }
   }
 
@@ -1069,6 +1201,16 @@ export default function VoiceModeUI() {
       streamRef.current = null;
     }
     
+    if (micSourceRef.current) {
+      try {
+        micSourceRef.current.disconnect();
+      } catch (err) {
+        console.warn("Could not disconnect mic source during cleanup:", err);
+      }
+      micSourceRef.current = null;
+      micAnalyserConnectedRef.current = false;
+    }
+    
     // Close AudioContext (only on full cleanup)
     if (audioContextRef.current) {
       audioContextRef.current.close();
@@ -1182,6 +1324,14 @@ export default function VoiceModeUI() {
                 }`}
               >
                 Start Conversation
+              </button>
+            )}
+            {needsAudioUnlock && (
+              <button
+                onClick={handleAudioUnlockRetry}
+                className="px-6 py-3 rounded-full font-semibold text-white bg-yellow-600 hover:bg-yellow-700 transition-all shadow-lg"
+              >
+                Tap to Enable Audio
               </button>
             )}
           </div>
