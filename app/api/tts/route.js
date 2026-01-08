@@ -49,7 +49,10 @@ export async function POST(request) {
       },
       body: JSON.stringify({
         text: text,
-        model_id: 'eleven_flash_v2',
+        model_id: 'eleven_flash_v2_5',
+        // Optimize for earliest possible audio
+        optimize_streaming_latency: 4,
+        output_format: 'mp3_44100_64',
         voice_settings: {
           stability: 0.5,
           similarity_boost: 0.75,
