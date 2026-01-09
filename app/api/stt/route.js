@@ -12,27 +12,42 @@ const requestCounts = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 const MAX_REQUESTS_PER_WINDOW = 30; // Max 30 STT requests per minute
 
+const MAX_MAP_SIZE = 10000; // Safety cap to prevent OOM
+
 function checkRateLimit(identifier) {
   const now = Date.now();
   const record = requestCounts.get(identifier) || { count: 0, windowStart: now };
-  
+
   // Reset window if expired
   if (now - record.windowStart > RATE_LIMIT_WINDOW_MS) {
     record.count = 0;
     record.windowStart = now;
   }
-  
+
   record.count++;
   requestCounts.set(identifier, record);
-  
-  // Cleanup expired entries on every request to prevent memory leak
+
+  // Probabilistic cleanup (run only 5% of the time)
+  // This avoids O(N) iteration on every single request
+  if (Math.random() < 0.05) {
+    cleanupExpiredEntries(now);
+  }
+
+  // Hard safety limit
+  if (requestCounts.size > MAX_MAP_SIZE) {
+    console.warn('⚠️ Rate limit map exceeded safety cap, clearing all entries');
+    requestCounts.clear();
+  }
+
+  return record.count <= MAX_REQUESTS_PER_WINDOW;
+}
+
+function cleanupExpiredEntries(now) {
   for (const [key, value] of requestCounts.entries()) {
     if (now - value.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
       requestCounts.delete(key);
     }
   }
-  
-  return record.count <= MAX_REQUESTS_PER_WINDOW;
 }
 
 // Common Whisper hallucinations when there's silence or background noise
@@ -67,26 +82,26 @@ const HALLUCINATION_PATTERNS = [
 
 function isLikelyHallucination(text) {
   const trimmed = text.trim();
-  
+
   // Empty or very short
   if (trimmed.length === 0 || trimmed.length < 2) {
     return true;
   }
-  
+
   // Check against hallucination patterns
   for (const pattern of HALLUCINATION_PATTERNS) {
     if (pattern.test(trimmed)) {
       return true;
     }
   }
-  
+
   return false;
 }
 
 export async function POST(request) {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
-    
+
     if (!apiKey) {
       return NextResponse.json(
         { error: 'OPENAI_API_KEY not configured' },
@@ -111,7 +126,7 @@ export async function POST(request) {
     // Get audio blob from form data
     const formData = await request.formData();
     const audioFile = formData.get('audio');
-    
+
     if (!audioFile) {
       return NextResponse.json(
         { error: 'No audio file provided' },
@@ -158,10 +173,10 @@ export async function POST(request) {
     const forcedMime =
       audioType ||
       (ext === 'mp4' ? 'audio/mp4' :
-       ext === 'ogg' ? 'audio/ogg' :
-       ext === 'wav' ? 'audio/wav' :
-       ext === 'mp3' ? 'audio/mpeg' :
-       'audio/webm');
+        ext === 'ogg' ? 'audio/ogg' :
+          ext === 'wav' ? 'audio/wav' :
+            ext === 'mp3' ? 'audio/mpeg' :
+              'audio/webm');
 
     console.log(`🎙️ STT processing: ${audioFile.size} bytes, type: ${audioType || '(none)'}, using: ${fileName} (${forcedMime})`);
 
