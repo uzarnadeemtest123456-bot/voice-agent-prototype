@@ -35,7 +35,7 @@ export default function VoiceModeUI() {
   const hasSpeechDetectedRef = useRef(false);
   const messagesRef = useRef([]);
   const pendingTextUpdateRef = useRef(false);
-  
+
   // Turn tracking for interruption handling
   const activeTurnIdRef = useRef(0);
 
@@ -46,13 +46,13 @@ export default function VoiceModeUI() {
   const currentChunkIdRef = useRef(0);
   const ttsAbortControllersRef = useRef(new Set());
   const speakingInterruptCheckRef = useRef(null);
-  
+
   // Listening lock to prevent double sessions
   const isStartingListeningRef = useRef(false);
-  
+
   // ProcessingStage ref to fix stale closure
   const processingStageRef = useRef("");
-  
+
   // Safari audio unlock tracking
   const audioContextUnlockRef = useRef(false);
 
@@ -104,18 +104,18 @@ export default function VoiceModeUI() {
   function ensureAudioQueue() {
     if (!audioQueueRef.current) {
       audioQueueRef.current = new AudioQueue();
-      
+
       // Setup callbacks
       audioQueueRef.current.onPlaybackStart = () => {
         console.log("🔊 Audio playback started");
         setStatus("speaking");
         setupSpeakingInterruptDetection();
       };
-      
+
       audioQueueRef.current.onPlaybackComplete = () => {
         console.log("✅ All audio playback complete");
         cleanupSpeakingInterruptDetection();
-        
+
         // Check if we should return to listening
         if (statusRef.current === "speaking" && activeTurnIdRef.current === activeRequestIdRef.current) {
           setStatus("listening");
@@ -134,15 +134,15 @@ export default function VoiceModeUI() {
 
   function initializeTTS(requestId) {
     console.log(`🎵 Initializing TTS for request ${requestId}`);
-    
+
     // Initialize audio queue if not exists
     ensureAudioQueue();
-    
+
     // Set active request
     audioQueueRef.current.setActiveRequest(requestId);
     activeRequestIdRef.current = requestId;
     currentChunkIdRef.current = 0;
-    
+
     // Initialize text chunker
     textChunkerRef.current = new TextChunker((chunk) => {
       const chunkId = currentChunkIdRef.current++;
@@ -162,7 +162,7 @@ export default function VoiceModeUI() {
 
     try {
       console.log(`🎤 Fetching TTS Stream [req:${requestId}, chunk:${chunkId}]...`);
-      
+
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: {
@@ -178,6 +178,9 @@ export default function VoiceModeUI() {
 
       if (!response.ok) {
         console.error(`❌ TTS API error: ${response.status}`);
+        if (audioQueueRef.current) {
+          audioQueueRef.current.markChunkFailed(requestId, chunkId);
+        }
         return;
       }
 
@@ -223,12 +226,12 @@ export default function VoiceModeUI() {
 
       while (true) {
         const { done, value } = await streamReader.read();
-        
+
         if (done) break;
-        
+
         chunks.push(value);
         totalBytes += value.length;
-        
+
         // Check if request still active during streaming
         if (requestId !== activeRequestIdRef.current) {
           console.log(`⚠️ Discarding TTS stream from old request ${requestId}`);
@@ -250,6 +253,10 @@ export default function VoiceModeUI() {
         console.log(`⚠️ TTS request aborted [req:${requestId}, chunk:${chunkId}]`);
       } else {
         console.error(`❌ TTS fetch error [req:${requestId}, chunk:${chunkId}]:`, err);
+        // Mark chunk as failed so queue doesn't stall
+        if (audioQueueRef.current) {
+          audioQueueRef.current.markChunkFailed(requestId, chunkId);
+        }
       }
     } finally {
       ttsAbortControllersRef.current.delete(abortController);
@@ -258,40 +265,40 @@ export default function VoiceModeUI() {
 
   function handleInterruption() {
     console.log("🛑 Interruption detected!");
-    
+
     // Increment request ID to invalidate ongoing TTS
     activeRequestIdRef.current += 1;
     activeTurnIdRef.current += 1;
-    
+
     // Stop all audio
     if (audioQueueRef.current) {
       audioQueueRef.current.stopAll();
     }
-    
+
     // Abort all in-flight TTS requests
     for (const controller of ttsAbortControllersRef.current) {
       controller.abort();
     }
     ttsAbortControllersRef.current.clear();
-    
+
     // Reset text chunker
     if (textChunkerRef.current) {
       textChunkerRef.current.reset();
     }
-    
+
     // Cleanup speaking interrupt detection
     cleanupSpeakingInterruptDetection();
-    
+
     // Abort n8n stream
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
-    
+
     // Clear text buffer
     assistantTextBufferRef.current = "";
     setCurrentAssistantText("");
     setProcessingStage("");
-    
+
     // Transition to listening
     setStatus("listening");
     startListening();
@@ -307,20 +314,20 @@ export default function VoiceModeUI() {
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    
+
     let highVolumeStart = null;
     let ambientRms = 0;
     const INTERRUPT_DURATION = 150; // 150ms of speech to trigger interrupt
     const AMBIENT_SMOOTHING = 0.2;
-    
+
     speakingInterruptCheckRef.current = setInterval(() => {
       // Only check when speaking
       if (statusRef.current !== "speaking") {
         return;
       }
-      
+
       analyser.getByteTimeDomainData(dataArray);
-      
+
       // Calculate RMS volume
       let sum = 0;
       for (let i = 0; i < bufferLength; i++) {
@@ -328,20 +335,20 @@ export default function VoiceModeUI() {
         sum += normalized * normalized;
       }
       const rms = Math.sqrt(sum / bufferLength);
-      
+
       // Track ambient noise floor and adapt threshold (Chrome suppression can lower RMS)
       ambientRms = ambientRms === 0
         ? rms
         : ambientRms * (1 - AMBIENT_SMOOTHING) + rms * AMBIENT_SMOOTHING;
       const dynamicThreshold = Math.max(ambientRms + 0.015, 0.02);
-      
+
       if (rms > dynamicThreshold) {
         if (!highVolumeStart) {
           highVolumeStart = Date.now();
         }
-        
+
         const duration = Date.now() - highVolumeStart;
-        
+
         // Trigger interruption if sustained
         if (duration >= INTERRUPT_DURATION) {
           console.log("🎤 User speaking detected during playback - interrupting!");
@@ -363,24 +370,24 @@ export default function VoiceModeUI() {
 
   function cleanupTTS() {
     console.log("🧹 Cleaning up TTS");
-    
+
     // Stop text chunker
     if (textChunkerRef.current) {
       textChunkerRef.current.reset();
       textChunkerRef.current = null;
     }
-    
+
     // Stop audio queue
     if (audioQueueRef.current) {
       audioQueueRef.current.cleanup();
     }
-    
+
     // Abort all TTS requests
     for (const controller of ttsAbortControllersRef.current) {
       controller.abort();
     }
     ttsAbortControllersRef.current.clear();
-    
+
     // Cleanup interrupt detection
     cleanupSpeakingInterruptDetection();
   }
@@ -396,30 +403,30 @@ export default function VoiceModeUI() {
       console.log('🔊 Safari audio already unlocked');
       return;
     }
-    
+
     try {
       // Create a temporary AudioContext
       const tempAudioContext = new (window.AudioContext || window.webkitAudioContext)();
-      
+
       // Create a silent audio buffer (1 sample)
       const buffer = tempAudioContext.createBuffer(1, 1, 22050);
       const source = tempAudioContext.createBufferSource();
       source.buffer = buffer;
       source.connect(tempAudioContext.destination);
-      
+
       // Play the silent audio
       source.start(0);
-      
+
       // Wait a tiny bit for the audio to "play"
       await new Promise(resolve => setTimeout(resolve, 10));
-      
+
       // Close the temporary context
       await tempAudioContext.close();
-      
+
       // Mark as unlocked
       audioContextUnlockRef.current = true;
       console.log('✅ Safari audio unlocked via AudioContext');
-      
+
     } catch (err) {
       console.log('⚠️ AudioContext unlock attempt (normal on some devices):', err.message);
       // Still mark as attempted to avoid repeated tries
@@ -472,33 +479,33 @@ export default function VoiceModeUI() {
       console.log("⚠️ Already starting listening, skipping");
       return;
     }
-    
+
     // Guard against already recording
     if (mediaRecorderRef.current?.state === "recording") {
       console.log("⚠️ Already recording, skipping");
       return;
     }
-    
+
     isStartingListeningRef.current = true;
-    
+
     try {
       // Reuse existing stream if available (for barge-in to work)
       let stream = streamRef.current;
-      
+
       if (!stream || !stream.active) {
         // Request microphone access with echo cancellation - works on ALL browsers
-        stream = await navigator.mediaDevices.getUserMedia({ 
+        stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
             sampleRate: 16000,
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true
-          } 
+          }
         });
         streamRef.current = stream;
       }
-      
+
       // Resume audio context if Safari has suspended it
       if (audioContextRef.current?.state === 'suspended') {
         try {
@@ -507,7 +514,7 @@ export default function VoiceModeUI() {
           console.warn("Could not resume audio context:", e);
         }
       }
-      
+
       audioChunksRef.current = [];
 
       // Create MediaRecorder - works on Firefox, Chrome, Brave, Tor, etc.
@@ -523,7 +530,7 @@ export default function VoiceModeUI() {
       } catch {
         mediaRecorder = new MediaRecorder(stream); // last resort - use browser default
       }
-      
+
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
@@ -567,7 +574,7 @@ export default function VoiceModeUI() {
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    
+
     // Reset speech detection flag
     hasSpeechDetectedRef.current = false;
 
@@ -621,10 +628,10 @@ export default function VoiceModeUI() {
   function setupListeningVAD() {
     const analyser = ensureAnalyserStream(streamRef.current);
     if (!analyser) return;
-    
+
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    
+
     // Reset speech detection flag
     hasSpeechDetectedRef.current = false;
 
@@ -688,17 +695,17 @@ export default function VoiceModeUI() {
   function stopListening() {
     // Only stop the MediaRecorder and VAD interval, NOT the mic stream
     cleanupVoiceActivityDetection();
-    
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
     }
-    
+
     // DO NOT stop stream tracks - keep mic alive for barge-in
   }
 
   async function processRecording() {
     console.log(`📝 Processing recording: ${audioChunksRef.current.length} chunks`);
-    
+
     // Check if we have any audio chunks
     if (audioChunksRef.current.length === 0) {
       console.log("⚠️ No audio chunks to process, restarting listening");
@@ -706,13 +713,13 @@ export default function VoiceModeUI() {
       await startListening();
       return;
     }
-    
-    const audioBlob = new Blob(audioChunksRef.current, { 
-      type: audioChunksRef.current[0]?.type || 'audio/webm' 
+
+    const audioBlob = new Blob(audioChunksRef.current, {
+      type: audioChunksRef.current[0]?.type || 'audio/webm'
     });
-    
+
     console.log(`📦 Audio blob size: ${audioBlob.size} bytes`);
-    
+
     // Increased minimum size threshold to avoid background noise
     // 10KB is a reasonable minimum for meaningful speech (~1 second)
     if (audioBlob.size < 10000) {
@@ -737,20 +744,20 @@ export default function VoiceModeUI() {
     try {
       // Call Whisper API for transcription
       const formData = new FormData();
-      
+
       // Choose extension based on actual blob type
       const mime = audioBlob.type || 'audio/webm';
       const ext =
         mime.includes('mp4') ? 'mp4' :
-        mime.includes('mpeg') ? 'mp3' :
-        mime.includes('ogg') ? 'ogg' :
-        mime.includes('wav') ? 'wav' :
-        'webm';
-      
+          mime.includes('mpeg') ? 'mp3' :
+            mime.includes('ogg') ? 'ogg' :
+              mime.includes('wav') ? 'wav' :
+                'webm';
+
       formData.append('audio', audioBlob, `recording.${ext}`);
 
       console.log("🎙️ Sending to STT API...");
-      
+
       const sttResponse = await fetch('/api/stt', {
         method: 'POST',
         body: formData,
@@ -764,7 +771,7 @@ export default function VoiceModeUI() {
 
       const sttData = await sttResponse.json();
       const transcript = sttData.text.trim();
-      
+
       console.log("Whisper transcript:", transcript);
 
       // Check if transcription was filtered as hallucination
@@ -784,7 +791,7 @@ export default function VoiceModeUI() {
         const newMessages = [...currentMessages, { role: "user", text: transcript }];
         setMessages(newMessages);
         messagesRef.current = newMessages; // Update ref immediately
-        
+
         // Now processing answer from n8n
         setProcessingStage("generating");
         await handleUserQuery(transcript, newMessages);
@@ -801,7 +808,7 @@ export default function VoiceModeUI() {
       setError(`Error: ${err.message}`);
       setStatus("error");
       setProcessingStage("");
-      
+
       setTimeout(() => {
         setStatus("listening");
         setError(null);
@@ -815,17 +822,17 @@ export default function VoiceModeUI() {
       setError(null);
       setNeedsAudioUnlock(false);
       setStatus("listening");
-      
+
       // 🔑 UNLOCK SAFARI AUDIO - Use AudioContext approach
       // Safari blocks autoplay unless triggered by direct user interaction
       // This unlocks audio playback for the entire session
       await unlockSafariAudio();
-      
+
       // Prime the actual audio element for Safari autoplay rules
       const queue = ensureAudioQueue();
       await queue.prime();
       setNeedsAudioUnlock(false);
-      
+
       setMessages([]);
       setCurrentAssistantText("");
       setUserTranscript("Listening... Just speak naturally!");
@@ -848,7 +855,7 @@ export default function VoiceModeUI() {
         await audioContextRef.current.resume();
       }
       setNeedsAudioUnlock(false);
-      
+
       // If we were idle due to block, re-enter listening
       if (statusRef.current === "idle") {
         setStatus("listening");
@@ -866,7 +873,7 @@ export default function VoiceModeUI() {
     // Increment turn ID to invalidate any previous ongoing work
     activeTurnIdRef.current += 1;
     const myTurn = activeTurnIdRef.current;
-    
+
     setStatus("thinking");
     setCurrentAssistantText("");
     assistantTextBufferRef.current = "";
@@ -880,7 +887,7 @@ export default function VoiceModeUI() {
       console.error("Error handling query:", err);
       setError(`Error: ${err.message}`);
       setStatus("error");
-      
+
       setTimeout(() => {
         setStatus("listening");
         setError(null);
@@ -894,7 +901,7 @@ export default function VoiceModeUI() {
 
     try {
       const webhookUrl = process.env.NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL;
-      
+
       if (!webhookUrl) {
         throw new Error("N8N_BRAIN_WEBHOOK_URL not configured");
       }
@@ -931,7 +938,7 @@ export default function VoiceModeUI() {
       }
 
       const contentType = response.headers.get("content-type");
-      
+
       if (contentType?.includes("text/event-stream")) {
         await handleSSEStream(response, myTurn);
       } else {
@@ -964,7 +971,7 @@ export default function VoiceModeUI() {
 
     try {
       let hasReceivedData = false;
-      
+
       while (true) {
         // Check if this turn is still active
         if (activeTurnIdRef.current !== myTurn) {
@@ -972,7 +979,7 @@ export default function VoiceModeUI() {
           clearTimeout(streamTimeout);
           return;
         }
-        
+
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -987,7 +994,7 @@ export default function VoiceModeUI() {
             clearTimeout(streamTimeout);
             return;
           }
-          
+
           if (event.event === "delta" && event.data?.text) {
             const newText = event.data.text;
             // Clear processing stage on first text chunk (use ref to avoid stale closure)
@@ -995,12 +1002,12 @@ export default function VoiceModeUI() {
               setProcessingStage("");
             }
             assistantTextBufferRef.current += newText;
-            
+
             // Feed text to TTS chunker
             if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
               textChunkerRef.current.add(newText);
             }
-            
+
             // Throttled UI update - only update once per frame
             if (!pendingTextUpdateRef.current) {
               pendingTextUpdateRef.current = true;
@@ -1025,18 +1032,23 @@ export default function VoiceModeUI() {
       }
 
       clearTimeout(streamTimeout);
-      
+
       // If stream ended but no data received, handle as error
       if (!hasReceivedData) {
         console.error("⚠️ SSE stream ended with no data");
         throw new Error("No response from n8n");
       }
 
+      // Flush any remaining buffered text to TTS even if no explicit "done" event arrived
+      if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
+        textChunkerRef.current.end();
+      }
+
       await finishAssistantResponse(myTurn);
 
     } catch (err) {
       clearTimeout(streamTimeout);
-      
+
       if (err.name === "AbortError") {
         console.log("⚠️ SSE stream aborted");
         return;
@@ -1052,16 +1064,36 @@ export default function VoiceModeUI() {
 
     setStatus("thinking");
 
+    const STREAM_TIMEOUT_MS = 30000;
+    let streamTimeout;
+
+    const resetStreamTimeout = () => {
+      if (streamTimeout) clearTimeout(streamTimeout);
+      streamTimeout = setTimeout(() => {
+        if (activeTurnIdRef.current === myTurn) {
+          console.error("⏱️ JSON stream timeout - aborting");
+          abortControllerRef.current?.abort();
+        }
+      }, STREAM_TIMEOUT_MS);
+    };
+
+    resetStreamTimeout();
+
     try {
       while (true) {
         // Check if this turn is still active
         if (activeTurnIdRef.current !== myTurn) {
           console.log("⚠️ JSON stream abandoned (interrupted)");
+          if (streamTimeout) {
+            clearTimeout(streamTimeout);
+          }
           return;
         }
-        
+
         const { done, value } = await reader.read();
         if (done) break;
+
+        resetStreamTimeout();
 
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
@@ -1075,12 +1107,15 @@ export default function VoiceModeUI() {
           // Check again before processing
           if (activeTurnIdRef.current !== myTurn) {
             console.log("⚠️ JSON stream abandoned (interrupted)");
+            if (streamTimeout) {
+              clearTimeout(streamTimeout);
+            }
             return;
           }
 
           try {
             const jsonObj = JSON.parse(line);
-            
+
             if (jsonObj.type === "item" && jsonObj.content) {
               try {
                 const contentObj = JSON.parse(jsonObj.content);
@@ -1091,18 +1126,18 @@ export default function VoiceModeUI() {
               } catch (e) {
                 // Content is regular text
               }
-              
+
               // Clear processing stage on first text chunk (use ref to avoid stale closure)
               if (processingStageRef.current) {
                 setProcessingStage("");
               }
               assistantTextBufferRef.current += jsonObj.content;
-              
+
               // Feed text to TTS chunker
               if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
                 textChunkerRef.current.add(jsonObj.content);
               }
-              
+
               setCurrentAssistantText(assistantTextBufferRef.current);
             }
           } catch (parseError) {
@@ -1116,12 +1151,12 @@ export default function VoiceModeUI() {
           const jsonObj = JSON.parse(buffer);
           if (jsonObj.type === "item" && jsonObj.content) {
             assistantTextBufferRef.current += jsonObj.content;
-            
+
             // Feed text to TTS chunker
             if (textChunkerRef.current && activeRequestIdRef.current === myTurn) {
               textChunkerRef.current.add(jsonObj.content);
             }
-            
+
             setCurrentAssistantText(assistantTextBufferRef.current);
           }
         } catch (e) {
@@ -1134,9 +1169,17 @@ export default function VoiceModeUI() {
         textChunkerRef.current.end();
       }
 
+      if (streamTimeout) {
+        clearTimeout(streamTimeout);
+      }
+
       await finishAssistantResponse(myTurn);
 
     } catch (err) {
+      if (streamTimeout) {
+        clearTimeout(streamTimeout);
+      }
+
       if (err.name === "AbortError") {
         console.log("⚠️ JSON stream aborted");
         return;
@@ -1151,9 +1194,9 @@ export default function VoiceModeUI() {
       console.log("⚠️ finishAssistantResponse abandoned (interrupted)");
       return;
     }
-    
+
     const fullText = assistantTextBufferRef.current.trim();
-    
+
     // Add final message to chat history
     if (fullText.length > 0) {
       setMessages((prev) => [...prev, { role: "assistant", text: fullText }]);
@@ -1163,11 +1206,11 @@ export default function VoiceModeUI() {
     setUserTranscript("");
     setProcessingStage("");
     setVolume(0);
-    
+
     // Check if audio queue has pending audio to play
-    const hasAudioToPlay = audioQueueRef.current && 
-                           (audioQueueRef.current.isPlaying() || audioQueueRef.current.getQueueSize() > 0);
-    
+    const hasAudioToPlay = audioQueueRef.current &&
+      (audioQueueRef.current.isPlaying() || audioQueueRef.current.getQueueSize() > 0);
+
     if (hasAudioToPlay) {
       console.log("📢 Audio playback pending, waiting for completion...");
       // Audio will play, and onPlaybackComplete callback will handle returning to listening
@@ -1175,13 +1218,13 @@ export default function VoiceModeUI() {
     } else {
       // No audio to play, return to listening immediately
       console.log("✅ No audio to play, returning to listening");
-      
+
       // Check again before starting new recording
       if (myTurn && activeTurnIdRef.current !== myTurn) {
         console.log("⚠️ finishAssistantResponse skipping startListening (interrupted)");
         return;
       }
-      
+
       setStatus("listening");
       await startListening();
       console.log("Ready for next turn");
@@ -1191,18 +1234,18 @@ export default function VoiceModeUI() {
   function cleanup() {
     cleanupVoiceActivityDetection();
     cleanupTTS();
-    
+
     // Stop MediaRecorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       mediaRecorderRef.current.stop();
     }
-    
+
     // Stop the mic stream (only on full cleanup)
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    
+
     if (micSourceRef.current) {
       try {
         micSourceRef.current.disconnect();
@@ -1212,13 +1255,13 @@ export default function VoiceModeUI() {
       micSourceRef.current = null;
       micAnalyserConnectedRef.current = false;
     }
-    
+
     // Close AudioContext (only on full cleanup)
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
-    
+
     analyserRef.current = null;
 
     if (abortControllerRef.current) {
@@ -1236,7 +1279,7 @@ export default function VoiceModeUI() {
       stopListening();
       return;
     }
-    
+
     // Otherwise, fully stop the voice mode
     setStatus("idle");
     cleanup();
@@ -1325,11 +1368,10 @@ export default function VoiceModeUI() {
               <button
                 onClick={startVoiceMode}
                 disabled={status === "error"}
-                className={`px-8 py-4 rounded-full font-semibold text-white transition-all transform hover:scale-105 ${
-                  status === "error"
-                    ? "bg-gray-600 cursor-not-allowed"
-                    : "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-lg hover:shadow-purple-500/50"
-                }`}
+                className={`px-8 py-4 rounded-full font-semibold text-white transition-all transform hover:scale-105 ${status === "error"
+                  ? "bg-gray-600 cursor-not-allowed"
+                  : "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-lg hover:shadow-purple-500/50"
+                  }`}
               >
                 Start Conversation
               </button>
@@ -1347,13 +1389,12 @@ export default function VoiceModeUI() {
           {/* Status Indicator */}
           <div className="flex items-center justify-center gap-2">
             <div
-              className={`w-2 h-2 rounded-full transition-colors ${
-                isActive
-                  ? "bg-green-500 animate-pulse"
-                  : status === "error"
+              className={`w-2 h-2 rounded-full transition-colors ${isActive
+                ? "bg-green-500 animate-pulse"
+                : status === "error"
                   ? "bg-red-500"
                   : "bg-gray-500"
-              }`}
+                }`}
             />
             <span className="text-sm text-gray-400">
               {isActive ? "Active" : status === "error" ? "Error" : "Offline"}
@@ -1391,11 +1432,10 @@ export default function VoiceModeUI() {
                   className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                 >
                   <div
-                    className={`max-w-[85%] rounded-2xl px-4 py-3 ${
-                      msg.role === "user"
-                        ? "bg-gradient-to-r from-purple-600 to-pink-600 text-white"
-                        : "bg-gray-700 text-gray-100"
-                    }`}
+                    className={`max-w-[85%] rounded-2xl px-4 py-3 ${msg.role === "user"
+                      ? "bg-gradient-to-r from-purple-600 to-pink-600 text-white"
+                      : "bg-gray-700 text-gray-100"
+                      }`}
                   >
                     <div className="flex items-center gap-2 mb-1">
                       <span className="text-xs font-semibold opacity-70">
