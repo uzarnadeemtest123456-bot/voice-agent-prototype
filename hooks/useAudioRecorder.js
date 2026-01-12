@@ -1,295 +1,166 @@
+"use client";
+
+import { useRef, useCallback } from "react";
+
 /**
- * Custom hook for audio recording and speech-to-text
- * Handles microphone access, recording, voice activity detection, and Whisper transcription
+ * Custom hook for managing audio recording with cross-browser support
+ * Handles microphone access, MediaRecorder, and audio chunk collection
  */
-
-import { useState, useRef, useCallback, useEffect } from 'react';
-
 export function useAudioRecorder() {
-  const [status, setStatus] = useState('idle'); // idle, listening, transcribing
-  const [transcript, setTranscript] = useState('');
-  const [volume, setVolume] = useState(0);
-  const [error, setError] = useState(null);
+    const mediaRecorderRef = useRef(null);
+    const audioChunksRef = useRef([]);
+    const streamRef = useRef(null);
+    const isStartingRef = useRef(false);
 
-  // Refs for audio recording
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const streamRef = useRef(null);
-  const analyserRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const silenceStartRef = useRef(null);
-  const volumeCheckIntervalRef = useRef(null);
-  const hasSpeechDetectedRef = useRef(false);
-  const statusRef = useRef('idle'); // Track status to avoid stale closures
+    /**
+     * Get or create microphone stream with echo cancellation
+     */
+    const getStream = useCallback(async () => {
+        // Reuse existing stream if available
+        if (streamRef.current?.active) {
+            return streamRef.current;
+        }
 
-  // Sync status to ref
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                sampleRate: 16000,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+        });
 
-  const cleanupVoiceActivityDetection = useCallback(() => {
-    if (volumeCheckIntervalRef.current) {
-      clearInterval(volumeCheckIntervalRef.current);
-      volumeCheckIntervalRef.current = null;
-    }
+        streamRef.current = stream;
+        return stream;
+    }, []);
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    silenceStartRef.current = null;
-    analyserRef.current = null;
-  }, []);
-
-  const stopRecording = useCallback(() => {
-    cleanupVoiceActivityDetection();
-    
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
-    }
-    
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-  }, [cleanupVoiceActivityDetection]);
-
-  const processRecording = useCallback(async () => {
-    const audioBlob = new Blob(audioChunksRef.current, { 
-      type: audioChunksRef.current[0]?.type || 'audio/webm' 
-    });
-    
-    // Must have at least some audio data (increased threshold to reduce hallucinations)
-    if (audioBlob.size < 5000) {
-      setStatus("idle");
-      return null;
-    }
-
-    // Only process if we detected actual speech
-    if (!hasSpeechDetectedRef.current) {
-      setStatus("idle");
-      return null;
-    }
-
-    setStatus("transcribing");
-    setTranscript("Transcribing...");
-
-    try {
-      // Call Whisper API for transcription
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.webm');
-
-      const sttResponse = await fetch('/api/stt', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!sttResponse.ok) {
-        throw new Error('Transcription failed');
-      }
-
-      const sttData = await sttResponse.json();
-      const transcriptText = sttData.text.trim();
-
-      // Filter out common Whisper hallucinations
-      const hallucinations = [
-        'thank you',
-        'thanks for watching',
-        'bye',
-        'bye-bye',
-        'subtitle',
-        'amara.org',
-        'www.',
-        'http',
-        '♪',
-        '...',
-        '.',
-        ','
-      ];
-      
-      const lowerText = transcriptText.toLowerCase();
-      const isHallucination = hallucinations.some(pattern => 
-        lowerText === pattern || (pattern.length > 3 && lowerText.includes(pattern))
-      );
-
-      if (transcriptText.length > 0 && !isHallucination && transcriptText.length > 2) {
-        setTranscript(transcriptText);
-        setStatus("idle");
-        return transcriptText;
-      } else {
-        setStatus("idle");
+    /**
+     * Detect best supported MIME type for MediaRecorder
+     */
+    const detectMimeType = useCallback(() => {
+        if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus"))
+            return "audio/webm;codecs=opus";
+        if (MediaRecorder.isTypeSupported("audio/webm")) return "audio/webm";
+        if (MediaRecorder.isTypeSupported("audio/mp4")) return "audio/mp4";
         return null;
-      }
+    }, []);
 
-    } catch (err) {
-      setError(`Error: ${err.message}`);
-      setStatus("error");
-      
-      setTimeout(() => {
-        setStatus("idle");
-        setError(null);
-      }, 3000);
-      
-      return null;
-    }
-  }, []);
+    /**
+     * Start recording audio
+     * @param {Function} onDataAvailable - Called when audio chunks are available
+     * @param {Function} onStop - Called when recording stops
+     * @returns {Promise<MediaStream>} The audio stream
+     */
+    const startRecording = useCallback(
+        async (onDataAvailable, onStop) => {
+            // Prevent double starts
+            if (isStartingRef.current) {
+                console.log("⚠️ Already starting recording, skipping");
+                return null;
+            }
 
-  const setupVoiceActivityDetection = useCallback((stream) => {
-    // Create AudioContext for volume analysis
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    audioContextRef.current = audioContext;
+            if (mediaRecorderRef.current?.state === "recording") {
+                console.log("⚠️ Already recording, skipping");
+                return streamRef.current;
+            }
 
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    analyserRef.current = analyser;
+            isStartingRef.current = true;
 
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
+            try {
+                const stream = await getStream();
+                audioChunksRef.current = [];
 
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    
-    // Reset speech detection flag
-    hasSpeechDetectedRef.current = false;
+                // Create MediaRecorder with best MIME type
+                const mimeType = detectMimeType();
+                let mediaRecorder;
 
-    // Check volume every 100ms
-    volumeCheckIntervalRef.current = setInterval(() => {
-      if (statusRef.current !== "listening") {
-        return;
-      }
+                try {
+                    mediaRecorder = mimeType
+                        ? new MediaRecorder(stream, { mimeType })
+                        : new MediaRecorder(stream);
+                } catch {
+                    mediaRecorder = new MediaRecorder(stream);
+                }
 
-      analyser.getByteTimeDomainData(dataArray);
+                mediaRecorderRef.current = mediaRecorder;
 
-      // Calculate average volume
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const normalized = (dataArray[i] - 128) / 128;
-        sum += normalized * normalized;
-      }
-      const rms = Math.sqrt(sum / bufferLength);
-      const currentVolume = rms;
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunksRef.current.push(event.data);
+                        onDataAvailable?.(event.data);
+                    }
+                };
 
-      setVolume(currentVolume);
+                mediaRecorder.onstop = async () => {
+                    if (audioChunksRef.current.length > 0) {
+                        const audioBlob = new Blob(audioChunksRef.current, {
+                            type: audioChunksRef.current[0]?.type || "audio/webm",
+                        });
+                        onStop?.(audioBlob);
+                    }
+                };
 
-      // Improved thresholds for better speech detection
-      const SILENCE_THRESHOLD = 0.006;  // Slightly higher to avoid background noise
-      const SPEECH_THRESHOLD = 0.020;    // Reasonable threshold to detect actual speech
-      const MIN_SPEECH_DURATION = 250;  // Require at least 250ms of continuous speech
-      
-      // Track speech duration
-      if (!window._speechStartTime) {
-        window._speechStartTime = null;
-      }
+                mediaRecorder.start(100); // Collect data every 100ms
+                console.log("🎙️ Recording started");
 
-      // Detect if user is actually speaking (sustained speech)
-      if (currentVolume > SPEECH_THRESHOLD) {
-        if (!window._speechStartTime) {
-          window._speechStartTime = Date.now();
-        } else {
-          const speechDuration = Date.now() - window._speechStartTime;
-          if (speechDuration >= MIN_SPEECH_DURATION) {
-            hasSpeechDetectedRef.current = true;
-          }
-        }
-        silenceStartRef.current = null;  // Reset silence counter during active speech
-      } else if (currentVolume < SILENCE_THRESHOLD) {
-        // Silence detected
-        window._speechStartTime = null;
-        
-        if (!silenceStartRef.current) {
-          silenceStartRef.current = Date.now();
-        }
+                return stream;
+            } finally {
+                isStartingRef.current = false;
+            }
+        },
+        [getStream, detectMimeType]
+    );
 
-        const silenceDuration = Date.now() - silenceStartRef.current;
-
-        // Auto-stop after 700ms of silence, but ONLY if speech was detected
-        // OPTIMIZATION: Reduced from 1300ms to 700ms for faster response (saves ~600ms!)
-        if (silenceDuration > 700 && hasSpeechDetectedRef.current && audioChunksRef.current.length > 0) {
-          clearInterval(volumeCheckIntervalRef.current);
-          window._speechStartTime = null;
-          
-          // Stop recording
-          cleanupVoiceActivityDetection();
-          
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+    /**
+     * Stop recording (keeps stream alive for barge-in)
+     */
+    const stopRecording = useCallback(() => {
+        if (mediaRecorderRef.current?.state === "recording") {
             mediaRecorderRef.current.stop();
-          }
-          
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
+        }
+    }, []);
+
+    /**
+     * Get current audio chunks
+     */
+    const getAudioChunks = useCallback(() => {
+        return audioChunksRef.current;
+    }, []);
+
+    /**
+     * Clear audio chunks
+     */
+    const clearChunks = useCallback(() => {
+        audioChunksRef.current = [];
+    }, []);
+
+    /**
+     * Full cleanup - stops stream tracks
+     */
+    const cleanup = useCallback(() => {
+        stopRecording();
+
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach((track) => track.stop());
             streamRef.current = null;
-          }
         }
-      } else {
-        // Volume between thresholds - DON'T reset silence if already counting
-        // This allows silence detection to continue when volume gradually decreases
-        window._speechStartTime = null;
-      }
-    }, 100);
-  }, [cleanupVoiceActivityDetection]);
+    }, [stopRecording]);
 
-  const startRecording = useCallback(async () => {
-    try {
-      setError(null);
-      setStatus("listening");
-      setTranscript("Listening... Just speak naturally!");
+    /**
+     * Check if currently recording
+     */
+    const isRecording = useCallback(() => {
+        return mediaRecorderRef.current?.state === "recording";
+    }, []);
 
-      // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true
-        } 
-      });
-      
-      streamRef.current = stream;
-      audioChunksRef.current = [];
-
-      // Create MediaRecorder
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
-      });
-      
-      mediaRecorderRef.current = mediaRecorder;
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        if (audioChunksRef.current.length > 0) {
-          await processRecording();
-        }
-      };
-
-      mediaRecorder.start(100);
-
-      // Setup Voice Activity Detection
-      setupVoiceActivityDetection(stream);
-
-    } catch (err) {
-      setError("Could not access microphone. Please grant permission.");
-      setStatus("error");
-    }
-  }, [setupVoiceActivityDetection, processRecording]);
-
-  const cleanup = useCallback(() => {
-    stopRecording();
-    audioChunksRef.current = [];
-  }, [stopRecording]);
-
-  return {
-    status,
-    transcript,
-    volume,
-    error,
-    startRecording,
-    stopRecording,
-    cleanup,
-  };
+    return {
+        startRecording,
+        stopRecording,
+        getAudioChunks,
+        clearChunks,
+        cleanup,
+        isRecording,
+        streamRef,
+    };
 }
