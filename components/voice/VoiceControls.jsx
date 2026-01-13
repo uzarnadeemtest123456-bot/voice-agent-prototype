@@ -14,7 +14,7 @@ export default function VoiceControls({
     return (
         <div className="flex flex-col items-center gap-4">
             {/* Control Buttons */}
-            <div className="flex gap-4 justify-center">
+            <div className="flex gap-4 justify-center flex-wrap">
                 {!isActive && (
                     <button
                         onClick={onStart}

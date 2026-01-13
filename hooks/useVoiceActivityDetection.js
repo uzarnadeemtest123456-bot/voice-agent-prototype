@@ -18,7 +18,7 @@ export function useVoiceActivityDetection() {
     // Thresholds
     const SILENCE_THRESHOLD = 0.01;
     const SPEECH_THRESHOLD = 0.03;
-    const SILENCE_DURATION_MS = 1500;
+    const SILENCE_DURATION_MS = 1000;
 
     /**
      * Ensure analyser is connected to stream
@@ -135,7 +135,7 @@ export function useVoiceActivityDetection() {
                     const silenceDuration = Date.now() - silenceStartRef.current;
 
                     if (silenceDuration > SILENCE_DURATION_MS && hasSpeechDetectedRef.current) {
-                        console.log("🔇 Speech detected + silence for 1.5s, triggering callback");
+                        console.log("🔇 Speech detected + silence for 1s, triggering callback");
                         stopVAD();
                         onSilenceDetected?.();
                     }

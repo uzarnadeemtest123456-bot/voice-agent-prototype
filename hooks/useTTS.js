@@ -14,6 +14,18 @@ export function useTTS() {
     const activeRequestIdRef = useRef(0);
     const currentChunkIdRef = useRef(0);
     const ttsAbortControllersRef = useRef(new Set());
+    const MAX_TTS_RETRIES = 3;
+    const RETRY_BASE_DELAY_MS = 600;
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const getRetryDelay = (attempt, retryAfterHeader) => {
+        const retryAfterSeconds = Number(retryAfterHeader);
+        if (!Number.isNaN(retryAfterSeconds) && retryAfterSeconds > 0) {
+            return retryAfterSeconds * 1000;
+        }
+        return RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+    };
 
     /**
      * Ensure AudioQueue is initialized
@@ -28,7 +40,7 @@ export function useTTS() {
     /**
      * Fetch TTS audio for a text chunk
      */
-    const fetchTTSAudio = useCallback(async (text, requestId, chunkId) => {
+    const fetchTTSAudio = useCallback(async (text, requestId, chunkId, attempt = 1) => {
         if (requestId !== activeRequestIdRef.current) {
             console.log(`⚠️ Skipping TTS for old request ${requestId}`);
             return;
@@ -48,6 +60,19 @@ export function useTTS() {
             });
 
             if (!response.ok) {
+                const canRetry = response.status === 429 || response.status >= 500;
+                if (canRetry && attempt < MAX_TTS_RETRIES && requestId === activeRequestIdRef.current) {
+                    const delay = getRetryDelay(attempt, response.headers.get("retry-after"));
+                    console.warn(
+                        `⚠️ TTS API error ${response.status} for chunk ${chunkId}, retrying in ${delay}ms (attempt ${
+                            attempt + 1
+                        }/${MAX_TTS_RETRIES})`
+                    );
+                    await sleep(delay);
+                    if (requestId !== activeRequestIdRef.current) return;
+                    return fetchTTSAudio(text, requestId, chunkId, attempt + 1);
+                }
+
                 console.error(`❌ TTS API error: ${response.status}`);
                 audioQueueRef.current?.markChunkFailed(requestId, chunkId);
                 return;
@@ -105,6 +130,19 @@ export function useTTS() {
             if (err.name === "AbortError") {
                 console.log(`⚠️ TTS request aborted [req:${requestId}, chunk:${chunkId}]`);
             } else {
+                if (attempt < MAX_TTS_RETRIES && requestId === activeRequestIdRef.current) {
+                    const delay = getRetryDelay(attempt);
+                    console.warn(
+                        `⚠️ TTS fetch error for chunk ${chunkId}, retrying in ${delay}ms (attempt ${
+                            attempt + 1
+                        }/${MAX_TTS_RETRIES})`,
+                        err
+                    );
+                    await sleep(delay);
+                    if (requestId !== activeRequestIdRef.current) return;
+                    return fetchTTSAudio(text, requestId, chunkId, attempt + 1);
+                }
+
                 console.error(`❌ TTS fetch error:`, err);
                 audioQueueRef.current?.markChunkFailed(requestId, chunkId);
             }

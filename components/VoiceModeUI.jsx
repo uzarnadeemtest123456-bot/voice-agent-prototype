@@ -14,18 +14,19 @@ import {
  * Orchestrates all voice interaction sub-components
  */
 export default function VoiceModeUI() {
-  const {
-    status,
-    processingStage,
-    volume,
-    error,
-    messages,
-    currentAssistantText,
-    needsAudioUnlock,
-    startVoiceMode,
-    handleAudioUnlockRetry,
-    isActive,
-  } = useVoiceMode();
+    const {
+        status,
+        processingStage,
+        volume,
+        error,
+        messages,
+        currentAssistantText,
+        needsAudioUnlock,
+        startVoiceMode,
+        handleAudioUnlockRetry,
+        interruptSpeaking,
+        isActive,
+    } = useVoiceMode();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center p-8">
@@ -53,6 +54,8 @@ export default function VoiceModeUI() {
             messages={messages}
             currentAssistantText={currentAssistantText}
             processingStage={processingStage}
+            status={status}
+            onInterrupt={interruptSpeaking}
           />
         )}
       </div>

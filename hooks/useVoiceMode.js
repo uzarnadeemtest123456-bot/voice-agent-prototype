@@ -30,6 +30,7 @@ export function useVoiceMode() {
     const assistantTextBufferRef = useRef("");
     const activeTurnIdRef = useRef(0);
     const pendingTextUpdateRef = useRef(false);
+    const completedTurnsRef = useRef(new Set());
     const audioContextUnlockRef = useRef(false);
     const speakingInterruptCheckRef = useRef(null);
 
@@ -102,20 +103,33 @@ export function useVoiceMode() {
     const setupSpeakingInterruptDetection = useCallback(() => {
         cleanupSpeakingInterruptDetection();
 
+        // Ensure audio context is live before arming detection
+        vad.resumeAudioContext().catch((err) => {
+            console.warn("⚠️ Could not resume audio context for interruption detection:", err);
+        });
+
+        if (!recorder.streamRef.current) {
+            console.warn("⚠️ No mic stream available for interruption detection");
+            return;
+        }
+
         const analyser = vad.getAnalyser(recorder.streamRef.current);
         if (!analyser) return;
 
         let highVolumeStart = null;
-        let ambientRms = 0;
-        const INTERRUPT_DURATION = 150;
-        const AMBIENT_SMOOTHING = 0.2;
+        let ambientRms = vad.calculateVolume(analyser);
+        const INTERRUPT_DURATION = 100;
+        const AMBIENT_SMOOTHING = 0.12;
+        const VALID_STATUSES = new Set(["thinking", "speaking"]);
+
+        console.log("🎧 Arming speaking interruption detection");
 
         speakingInterruptCheckRef.current = setInterval(() => {
-            if (statusRef.current !== "speaking") return;
+            if (!VALID_STATUSES.has(statusRef.current)) return;
 
             const rms = vad.calculateVolume(analyser);
             ambientRms = ambientRms === 0 ? rms : ambientRms * (1 - AMBIENT_SMOOTHING) + rms * AMBIENT_SMOOTHING;
-            const dynamicThreshold = Math.max(ambientRms + 0.015, 0.02);
+            const dynamicThreshold = Math.max(ambientRms + 0.01, 0.015);
 
             if (rms > dynamicThreshold) {
                 if (!highVolumeStart) highVolumeStart = Date.now();
@@ -138,6 +152,7 @@ export function useVoiceMode() {
         if (speakingInterruptCheckRef.current) {
             clearInterval(speakingInterruptCheckRef.current);
             speakingInterruptCheckRef.current = null;
+            console.log("🛑 Speaking interruption detection cleared");
         }
     }, []);
 
@@ -153,12 +168,21 @@ export function useVoiceMode() {
         n8nStream.abort();
 
         assistantTextBufferRef.current = "";
+        pendingTextUpdateRef.current = false;
         setCurrentAssistantText("");
         setProcessingStage("");
         setStatus("listening");
         startListening();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tts, n8nStream, cleanupSpeakingInterruptDetection]);
+
+    /**
+     * Manual interruption trigger (UI button)
+     */
+    const interruptSpeaking = useCallback(() => {
+        if (statusRef.current !== "speaking") return;
+        handleInterruption();
+    }, [handleInterruption]);
 
     /**
      * Start listening
@@ -257,6 +281,7 @@ export function useVoiceMode() {
     const handleUserQuery = useCallback(async (query, currentMessages) => {
         activeTurnIdRef.current += 1;
         const myTurn = activeTurnIdRef.current;
+        completedTurnsRef.current.delete(myTurn);
 
         setStatus("thinking");
         setCurrentAssistantText("");
@@ -267,7 +292,9 @@ export function useVoiceMode() {
             onPlaybackStart: () => {
                 console.log("🔊 Audio playback started");
                 setStatus("speaking");
-                setupSpeakingInterruptDetection();
+                if (!speakingInterruptCheckRef.current) {
+                    setupSpeakingInterruptDetection();
+                }
             },
             onPlaybackComplete: () => {
                 console.log("✅ All audio playback complete");
@@ -282,6 +309,9 @@ export function useVoiceMode() {
                 setNeedsAudioUnlock(true);
             },
         });
+
+        // Arm interruption detection as soon as STT is done so barge-in works before audio starts
+        setupSpeakingInterruptDetection();
 
         // Prepare message context
         const messageContext = currentMessages.slice(-10).map((msg) => ({
@@ -332,6 +362,10 @@ export function useVoiceMode() {
      */
     const finishAssistantResponse = useCallback(async (myTurn) => {
         if (myTurn && activeTurnIdRef.current !== myTurn) return;
+        if (myTurn && completedTurnsRef.current.has(myTurn)) return;
+        if (myTurn) {
+            completedTurnsRef.current.add(myTurn);
+        }
 
         const fullText = assistantTextBufferRef.current.trim();
 
@@ -339,6 +373,8 @@ export function useVoiceMode() {
             setMessages((prev) => [...prev, { role: "assistant", text: fullText }]);
         }
 
+        assistantTextBufferRef.current = "";
+        pendingTextUpdateRef.current = false;
         setCurrentAssistantText("");
         setUserTranscript("");
         setProcessingStage("");
@@ -363,6 +399,7 @@ export function useVoiceMode() {
             setError(null);
             setNeedsAudioUnlock(false);
             setStatus("listening");
+            completedTurnsRef.current.clear();
 
             await unlockSafariAudio();
             await tts.primeAudio();
@@ -425,6 +462,7 @@ export function useVoiceMode() {
         n8nStream.cleanup();
         cleanupSpeakingInterruptDetection();
         assistantTextBufferRef.current = "";
+        pendingTextUpdateRef.current = false;
     }, [vad, recorder, tts, n8nStream, cleanupSpeakingInterruptDetection]);
 
     return {
@@ -442,6 +480,7 @@ export function useVoiceMode() {
         startVoiceMode,
         handleStop,
         handleAudioUnlockRetry,
+        interruptSpeaking,
 
         // Computed
         isActive: status !== "idle" && status !== "error",
