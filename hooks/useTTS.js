@@ -14,10 +14,21 @@ export function useTTS() {
     const activeRequestIdRef = useRef(0);
     const currentChunkIdRef = useRef(0);
     const ttsAbortControllersRef = useRef(new Set());
+    const providerRef = useRef("elevenlabs"); // Default to ElevenLabs
     const MAX_TTS_RETRIES = 3;
     const RETRY_BASE_DELAY_MS = 600;
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    /**
+     * Set TTS Provider
+     */
+    const setProvider = useCallback((provider) => {
+        if (provider === "elevenlabs" || provider === "minimax") {
+            providerRef.current = provider;
+            console.log(`🗣️ TTS Provider set to: ${provider}`);
+        }
+    }, []);
 
     const getRetryDelay = (attempt, retryAfterHeader) => {
         const retryAfterSeconds = Number(retryAfterHeader);
@@ -50,9 +61,12 @@ export function useTTS() {
         ttsAbortControllersRef.current.add(abortController);
 
         try {
-            console.log(`🎤 Fetching TTS Stream [req:${requestId}, chunk:${chunkId}]...`);
+            const provider = providerRef.current;
+            console.log(`🎤 Fetching TTS Stream via ${provider} [req:${requestId}, chunk:${chunkId}]...`);
 
-            const response = await fetch("/api/tts", {
+            const endpoint = `/api/tts/${provider}`;
+
+            const response = await fetch(endpoint, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ text, requestId, chunkId }),
@@ -64,8 +78,7 @@ export function useTTS() {
                 if (canRetry && attempt < MAX_TTS_RETRIES && requestId === activeRequestIdRef.current) {
                     const delay = getRetryDelay(attempt, response.headers.get("retry-after"));
                     console.warn(
-                        `⚠️ TTS API error ${response.status} for chunk ${chunkId}, retrying in ${delay}ms (attempt ${
-                            attempt + 1
+                        `⚠️ TTS API error ${response.status} for chunk ${chunkId}, retrying in ${delay}ms (attempt ${attempt + 1
                         }/${MAX_TTS_RETRIES})`
                     );
                     await sleep(delay);
@@ -133,8 +146,7 @@ export function useTTS() {
                 if (attempt < MAX_TTS_RETRIES && requestId === activeRequestIdRef.current) {
                     const delay = getRetryDelay(attempt);
                     console.warn(
-                        `⚠️ TTS fetch error for chunk ${chunkId}, retrying in ${delay}ms (attempt ${
-                            attempt + 1
+                        `⚠️ TTS fetch error for chunk ${chunkId}, retrying in ${delay}ms (attempt ${attempt + 1
                         }/${MAX_TTS_RETRIES})`,
                         err
                     );
@@ -274,5 +286,6 @@ export function useTTS() {
         cleanup,
         getActiveRequestId,
         ensureAudioQueue,
+        setProvider,
     };
 }

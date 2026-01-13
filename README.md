@@ -31,12 +31,12 @@ User Hears Response
 - Whisper prompt handles brand name accuracy (TuxMat, etc.)
 - All responses come from n8n (streaming supported)
 
-### 3. **Superior Text-to-Speech (TTS)**
-- ❌ **Removed:** OpenAI TTS (stuttering issues)
-- ✅ **New:** ElevenLabs TTS
-- Natural, emotional, human-like voices
-- Streaming support for instant playback
-- No stuttering or robotic sound
+### 3. **Flexible Text-to-Speech (TTS)**
+- ✅ **New:** Support for both **ElevenLabs** and **Minimax**
+- **ElevenLabs:** Natural, emotional, human-like voices
+- **Minimax:** Ultra-low latency, cost-effective high speed generation
+- User-selectable provider from the UI interface
+- Streaming support for both providers
 
 ## 🚀 Setup Instructions
 
@@ -44,7 +44,8 @@ User Hears Response
 
 - Node.js 18+ installed
 - OpenAI API key (for Whisper STT with context prompts)
-- ElevenLabs API key (for high-quality TTS)
+- ElevenLabs API key (optional, for high-quality TTS)
+- Minimax API key (optional, for low-latency TTS)
 - n8n webhook URL configured
 
 ### 1. Install Dependencies
@@ -66,7 +67,7 @@ NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL=your_n8n_webhook_url_here
 OPENAI_API_KEY=your_openai_api_key_here
 
 # ElevenLabs API Configuration
-# Required for: High-quality TTS (natural, emotional, no stuttering)
+# Required if using ElevenLabs TTS
 # Get your API key from: https://elevenlabs.io/
 ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 
@@ -74,6 +75,17 @@ ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 # Default: Rachel (21m00Tcm4TlvDq8ikWAM) - natural, warm, clear
 # Other options: Bella (EXAVITQu4vr4xnSDxMaL), Josh (TxGEqnHWrfWFTfGW9XjX)
 ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+
+# Minimax API Configuration
+# Required if using Minimax TTS
+# Get your API key/Group ID from: https://platform.minimax.io/
+MINIMAX_API_KEY=your_minimax_api_key_here
+MINIMAX_GROUP_ID=your_minimax_group_id_here
+
+# Minimax Voice Configuration (Optional)
+# Default: male-qn-qingse
+MINIMAX_VOICE_ID=male-qn-qingse
+
 ```
 
 ### 3. Get API Keys
@@ -176,13 +188,17 @@ vapi_voice_test/
 - **Browser Support:** All (Firefox, Tor, Brave, Chrome, etc.)
 - **Features:** Brand name accuracy via prompt parameter
 
-### `/api/tts` - Text-to-Speech (Active)
+### `/api/tts/elevenlabs` - ElevenLabs TTS
 - **Method:** POST
-- **Input:** `{ text: "text to speak" }`
+- **Input:** `{ text: "text to speak", requestId, chunkId }`
 - **Output:** Audio stream (MP3)
-- **Technology:** ElevenLabs
-- **Quality:** High (natural, emotional, no stuttering)
-- **Features:** Streaming support for instant playback
+- **Features:** Streaming support, cross-browser compatible
+
+### `/api/tts/minimax` - Minimax TTS
+- **Method:** POST
+- **Input:** `{ text: "text to speak", requestId, chunkId }`
+- **Output:** Audio stream (MP3)
+- **Features:** Streaming support, ultra-low latency, cross-browser compatible
 
 ## 🐛 Troubleshooting
 
