@@ -33,7 +33,7 @@ export function useN8nStream() {
             body: JSON.stringify({
                 query: userText,
                 message_context: messageContext,
-                knowledge_model: 23,
+                knowledge_model: 21,
                 country: "CA",
             }),
             signal: abortControllerRef.current.signal,
