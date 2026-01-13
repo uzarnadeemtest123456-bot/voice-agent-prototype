@@ -7,6 +7,7 @@ import {
   ConversationPanel,
   VoiceHeader,
   VoiceInstructions,
+  TTSProviderSelector,
 } from "./voice";
 
 /**
@@ -14,19 +15,21 @@ import {
  * Orchestrates all voice interaction sub-components
  */
 export default function VoiceModeUI() {
-    const {
-        status,
-        processingStage,
-        volume,
-        error,
-        messages,
-        currentAssistantText,
-        needsAudioUnlock,
-        startVoiceMode,
-        handleAudioUnlockRetry,
-        interruptSpeaking,
-        isActive,
-    } = useVoiceMode();
+  const {
+    status,
+    processingStage,
+    volume,
+    error,
+    messages,
+    currentAssistantText,
+    needsAudioUnlock,
+    startVoiceMode,
+    handleAudioUnlockRetry,
+    interruptSpeaking,
+    isActive,
+    ttsProvider,
+    setTtsProvider,
+  } = useVoiceMode();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center p-8">
@@ -44,6 +47,14 @@ export default function VoiceModeUI() {
             onStart={startVoiceMode}
             onAudioUnlock={handleAudioUnlockRetry}
           />
+
+          <div className="mt-8 transition-all duration-300 transform">
+            <TTSProviderSelector
+              selectedProvider={ttsProvider}
+              onProviderChange={setTtsProvider}
+              disabled={status !== "idle"}
+            />
+          </div>
 
           {status === "idle" && <VoiceInstructions />}
         </div>

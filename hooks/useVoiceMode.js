@@ -22,6 +22,7 @@ export function useVoiceMode() {
     const [currentAssistantText, setCurrentAssistantText] = useState("");
     const [userTranscript, setUserTranscript] = useState("");
     const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+    const [ttsProvider, setTtsProvider] = useState("elevenlabs");
 
     // Refs for state sync
     const statusRef = useRef("idle");
@@ -401,6 +402,9 @@ export function useVoiceMode() {
             setStatus("listening");
             completedTurnsRef.current.clear();
 
+            // Ensure TTS provider is set
+            tts.setProvider(ttsProvider);
+
             await unlockSafariAudio();
             await tts.primeAudio();
             setNeedsAudioUnlock(false);
@@ -416,7 +420,7 @@ export function useVoiceMode() {
             setStatus("error");
             setNeedsAudioUnlock(true);
         }
-    }, [unlockSafariAudio, tts, startListening]);
+    }, [unlockSafariAudio, tts, startListening, ttsProvider]);
 
     /**
      * Handle audio unlock retry
@@ -475,6 +479,8 @@ export function useVoiceMode() {
         currentAssistantText,
         userTranscript,
         needsAudioUnlock,
+        ttsProvider,
+        setTtsProvider,
 
         // Actions
         startVoiceMode,
