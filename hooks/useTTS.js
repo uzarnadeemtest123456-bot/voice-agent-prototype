@@ -3,6 +3,7 @@
 import { useRef, useCallback } from "react";
 import { TextChunker } from "@/lib/textChunker";
 import { AudioQueue } from "@/lib/audioQueue";
+import { normalizePronunciationMarkers } from "@/lib/pronunciation";
 
 /**
  * Custom hook for Text-to-Speech management
@@ -26,7 +27,6 @@ export function useTTS() {
     const setProvider = useCallback((provider) => {
         if (provider === "elevenlabs" || provider === "minimax") {
             providerRef.current = provider;
-            console.log(`🗣️ TTS Provider set to: ${provider}`);
         }
     }, []);
 
@@ -53,7 +53,6 @@ export function useTTS() {
      */
     const fetchTTSAudio = useCallback(async (text, requestId, chunkId, attempt = 1) => {
         if (requestId !== activeRequestIdRef.current) {
-            console.log(`⚠️ Skipping TTS for old request ${requestId}`);
             return;
         }
 
@@ -62,8 +61,6 @@ export function useTTS() {
 
         try {
             const provider = providerRef.current;
-            console.log(`🎤 Fetching TTS Stream via ${provider} [req:${requestId}, chunk:${chunkId}]...`);
-
             const endpoint = `/api/tts/${provider}`;
 
             const response = await fetch(endpoint, {
@@ -92,7 +89,6 @@ export function useTTS() {
             }
 
             if (requestId !== activeRequestIdRef.current) {
-                console.log(`⚠️ Discarding TTS response from old request ${requestId}`);
                 return;
             }
 
@@ -112,7 +108,6 @@ export function useTTS() {
                     "audio/mpeg"
                 );
                 if (queued) {
-                    console.log(`🚰 Streaming TTS audio [req:${requestId}, chunk:${chunkId}]`);
                     return;
                 }
             }
@@ -131,17 +126,14 @@ export function useTTS() {
                 if (done) break;
                 chunks.push(value);
                 if (requestId !== activeRequestIdRef.current) {
-                    console.log(`⚠️ Discarding TTS stream from old request ${requestId}`);
                     return;
                 }
             }
 
             const audioBlob = new Blob(chunks, { type: "audio/mpeg" });
-            console.log(`✅ TTS audio complete [req:${requestId}, chunk:${chunkId}]: ${audioBlob.size} bytes`);
             audioQueueRef.current?.enqueue(requestId, chunkId, audioBlob);
         } catch (err) {
             if (err.name === "AbortError") {
-                console.log(`⚠️ TTS request aborted [req:${requestId}, chunk:${chunkId}]`);
             } else {
                 if (attempt < MAX_TTS_RETRIES && requestId === activeRequestIdRef.current) {
                     const delay = getRetryDelay(attempt);
@@ -189,7 +181,11 @@ export function useTTS() {
             // Initialize text chunker
             textChunkerRef.current = new TextChunker((chunk) => {
                 const chunkId = currentChunkIdRef.current++;
-                fetchTTSAudio(chunk, requestId, chunkId);
+                const normalizedChunk = normalizePronunciationMarkers(chunk);
+                console.log(
+                    `🗣️ TTS text [req:${requestId}, chunk:${chunkId}]: "${normalizedChunk.substring(0, 120)}..."`
+                );
+                fetchTTSAudio(normalizedChunk, requestId, chunkId);
             });
         },
         [ensureAudioQueue, fetchTTSAudio]
@@ -267,13 +263,6 @@ export function useTTS() {
         audioQueueRef.current?.cleanup();
     }, [stopAll]);
 
-    /**
-     * Get current active request ID
-     */
-    const getActiveRequestId = useCallback(() => {
-        return activeRequestIdRef.current;
-    }, []);
-
     return {
         initializeTTS,
         addText,
@@ -284,8 +273,6 @@ export function useTTS() {
         isPlaying,
         getQueueSize,
         cleanup,
-        getActiveRequestId,
-        ensureAudioQueue,
         setProvider,
     };
 }

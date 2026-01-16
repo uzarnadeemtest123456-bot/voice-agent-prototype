@@ -35,8 +35,6 @@ export async function POST(request) {
       );
     }
 
-    console.log(`🎤 TTS Streaming Request [req:${requestId}, chunk:${chunkId}]: "${text.substring(0, 50)}..."`);
-
     // Use ElevenLabs STREAMING endpoint for lower latency
     const elevenLabsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`;
     
@@ -51,8 +49,8 @@ export async function POST(request) {
         text: text,
         model_id: 'eleven_flash_v2_5',
         // Optimize for earliest possible audio
-        optimize_streaming_latency: 4,
-        output_format: 'mp3_44100_64',
+        optimize_streaming_latency: 3,
+        output_format: 'mp3_44100_128',
         voice_settings: {
           stability: 0.5,
           similarity_boost: 0.75,
@@ -74,8 +72,6 @@ export async function POST(request) {
 
     // Stream the audio chunks directly to frontend (lower latency!)
     // This allows frontend to start downloading as soon as ElevenLabs starts generating
-    console.log(`✅ TTS Stream started [req:${requestId}, chunk:${chunkId}]`);
-
     // Return streaming response
     return new NextResponse(elevenLabsResponse.body, {
       status: 200,
@@ -90,7 +86,6 @@ export async function POST(request) {
   } catch (error) {
     // Check if request was aborted
     if (error.name === 'AbortError') {
-      console.log('⚠️ TTS request aborted');
       return new NextResponse(null, { status: 499 }); // Client closed request
     }
 

@@ -28,8 +28,6 @@ export async function POST(request) {
             );
         }
 
-        console.log(`🎤 Minimax TTS Streaming Request [req:${requestId}, chunk:${chunkId}]: "${text.substring(0, 50)}..."`);
-
         const minimaxUrl = 'https://api.minimax.io/v1/t2a_v2';
 
         // Minimax T2A v2 Payload
@@ -39,7 +37,7 @@ export async function POST(request) {
             stream: true,
             voice_setting: {
                 voice_id: voiceId || "male-qn-qingse", // Default if not provided
-                speed: 1.0,
+                speed: 1.1,
                 vol: 1.0,
                 pitch: 0
             },
@@ -72,8 +70,6 @@ export async function POST(request) {
 
         // Minimax returns SSE (text/event-stream) with "data: { \"data\": { \"audio\": \"<hex>\" } }"
         // We need to decode this stream into raw audio bytes for the frontend
-
-        console.log(`✅ Minimax TTS Stream started [req:${requestId}, chunk:${chunkId}]`);
 
         const decoder = new TextDecoder();
         const hexToBytes = (hexString) => {
@@ -176,7 +172,6 @@ export async function POST(request) {
 
     } catch (error) {
         if (error.name === 'AbortError') {
-            console.log('⚠️ Minimax TTS request aborted');
             return new NextResponse(null, { status: 499 });
         }
 

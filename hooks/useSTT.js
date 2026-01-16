@@ -15,7 +15,6 @@ export function useSTT() {
     const transcribe = useCallback(async (audioBlob) => {
         // Validate minimum size (10KB for meaningful speech)
         if (audioBlob.size < 10000) {
-            console.log("⚠️ Recording too short or low quality");
             return { text: "", filtered: true, reason: "too_short" };
         }
 
@@ -35,8 +34,6 @@ export function useSTT() {
 
         formData.append("audio", audioBlob, `recording.${ext}`);
 
-        console.log("🎙️ Sending to STT API...");
-
         const response = await fetch("/api/stt", {
             method: "POST",
             body: formData,
@@ -50,8 +47,6 @@ export function useSTT() {
 
         const data = await response.json();
         const transcript = data.text.trim();
-
-        console.log("📝 Whisper transcript:", transcript);
 
         return {
             text: transcript,

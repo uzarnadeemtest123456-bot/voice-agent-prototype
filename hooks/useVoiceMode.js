@@ -6,7 +6,11 @@ import { useVoiceActivityDetection } from "./useVoiceActivityDetection";
 import { useTTS } from "./useTTS";
 import { useSTT } from "./useSTT";
 import { useN8nStream } from "./useN8nStream";
+import { useConversation } from "./useConversation";
+import { useVoiceInterruption } from "./useVoiceInterruption";
 import { getBreathingScale } from "@/lib/audioLevel";
+import { stripPronunciationMarkers } from "@/lib/pronunciation";
+import { resumeAudioContext } from "@/lib/audioContext";
 
 /**
  * Main orchestration hook for voice mode
@@ -18,7 +22,6 @@ export function useVoiceMode() {
     const [processingStage, setProcessingStage] = useState(""); // transcribing, generating
     const [volume, setVolume] = useState(0);
     const [error, setError] = useState(null);
-    const [messages, setMessages] = useState([]);
     const [currentAssistantText, setCurrentAssistantText] = useState("");
     const [userTranscript, setUserTranscript] = useState("");
     const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
@@ -26,14 +29,13 @@ export function useVoiceMode() {
 
     // Refs for state sync
     const statusRef = useRef("idle");
-    const messagesRef = useRef([]);
     const processingStageRef = useRef("");
     const assistantTextBufferRef = useRef("");
+    const ttsMarkerBufferRef = useRef("");
     const activeTurnIdRef = useRef(0);
     const pendingTextUpdateRef = useRef(false);
     const completedTurnsRef = useRef(new Set());
     const audioContextUnlockRef = useRef(false);
-    const speakingInterruptCheckRef = useRef(null);
 
     // Hooks
     const recorder = useAudioRecorder();
@@ -41,6 +43,7 @@ export function useVoiceMode() {
     const tts = useTTS();
     const stt = useSTT();
     const n8nStream = useN8nStream();
+    const conversation = useConversation();
 
     // Sync state to refs
     useEffect(() => {
@@ -48,12 +51,47 @@ export function useVoiceMode() {
     }, [status]);
 
     useEffect(() => {
-        messagesRef.current = messages;
-    }, [messages]);
-
-    useEffect(() => {
         processingStageRef.current = processingStage;
     }, [processingStage]);
+
+    // Handle interruption logic
+    const handleInterruption = useCallback(() => {
+        console.log("🛑 Interruption detected!");
+
+        activeTurnIdRef.current += 1;
+        tts.stopAll();
+        // n8n abort needs cleanup (handled in streamQuery cancellation if new request comes or explicit abort)
+        n8nStream.abort();
+
+        assistantTextBufferRef.current = "";
+        ttsMarkerBufferRef.current = "";
+        pendingTextUpdateRef.current = false;
+        setCurrentAssistantText("");
+        setProcessingStage("");
+        setStatus("listening");
+
+        // We don't call startListening here because interruption usually happens 
+        // while user is speaking, so we want to CAPTURE that speech.
+        // However, recorder might be off if we were "speaking". 
+        // Usually "speaking" state implies we stopped recording to play audio?
+        // Wait, let's check legacy logic.
+        // Legacy: tts.stopAll() -> setStatus("listening") -> startListening()
+        startListening();
+    }, [tts, n8nStream]); // Added startListening dependency below to avoid circularity issues if defined later? No, hoisting works.
+
+    // Interruption Hook
+    const { setupSpeakingInterruptDetection, cleanupSpeakingInterruptDetection } =
+        useVoiceInterruption(vad, recorder.streamRef.current, statusRef, handleInterruption);
+
+    // Update interrupt detection when stream changes or status changes to speaking
+    useEffect(() => {
+        if (status === 'speaking' || status === 'thinking') {
+            setupSpeakingInterruptDetection();
+        } else {
+            cleanupSpeakingInterruptDetection();
+        }
+    }, [status, recorder.streamRef, setupSpeakingInterruptDetection, cleanupSpeakingInterruptDetection]);
+
 
     // Breathing animation for idle state
     useEffect(() => {
@@ -75,107 +113,57 @@ export function useVoiceMode() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Buffer tilde-wrapped markers so chunking never splits a number marker.
+    const collectTTSChunk = useCallback((incoming) => {
+        if (!incoming) return "";
+        let output = "";
+        let markerBuffer = ttsMarkerBufferRef.current;
+        let inMarker = markerBuffer.length > 0;
+
+        for (let i = 0; i < incoming.length; i++) {
+            const ch = incoming[i];
+            if (!inMarker) {
+                if (ch === "~") {
+                    inMarker = true;
+                    markerBuffer = "~";
+                } else {
+                    output += ch;
+                }
+            } else {
+                markerBuffer += ch;
+                if (ch === "~") {
+                    output += markerBuffer;
+                    markerBuffer = "";
+                    inMarker = false;
+                }
+            }
+        }
+
+        ttsMarkerBufferRef.current = markerBuffer;
+        return output;
+    }, []);
+
+    const flushTTSMarkerBuffer = useCallback(() => {
+        if (!ttsMarkerBufferRef.current) return;
+        const pending = stripPronunciationMarkers(ttsMarkerBufferRef.current);
+        ttsMarkerBufferRef.current = "";
+        if (pending) {
+            tts.addText(pending);
+        }
+    }, [tts]);
+
     /**
      * Unlock Safari audio
      */
     const unlockSafariAudio = useCallback(async () => {
         if (audioContextUnlockRef.current) return;
-
         try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const buffer = ctx.createBuffer(1, 1, 22050);
-            const source = ctx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(ctx.destination);
-            source.start(0);
-            await new Promise((resolve) => setTimeout(resolve, 10));
-            await ctx.close();
+            await resumeAudioContext();
             audioContextUnlockRef.current = true;
-            console.log("✅ Safari audio unlocked");
         } catch (err) {
-            console.log("⚠️ AudioContext unlock attempt:", err.message);
             audioContextUnlockRef.current = true;
         }
     }, []);
-
-    /**
-     * Setup speaking interrupt detection
-     */
-    const setupSpeakingInterruptDetection = useCallback(() => {
-        cleanupSpeakingInterruptDetection();
-
-        // Ensure audio context is live before arming detection
-        vad.resumeAudioContext().catch((err) => {
-            console.warn("⚠️ Could not resume audio context for interruption detection:", err);
-        });
-
-        if (!recorder.streamRef.current) {
-            console.warn("⚠️ No mic stream available for interruption detection");
-            return;
-        }
-
-        const analyser = vad.getAnalyser(recorder.streamRef.current);
-        if (!analyser) return;
-
-        let highVolumeStart = null;
-        let ambientRms = vad.calculateVolume(analyser);
-        const INTERRUPT_DURATION = 100;
-        const AMBIENT_SMOOTHING = 0.12;
-        const VALID_STATUSES = new Set(["thinking", "speaking"]);
-
-        console.log("🎧 Arming speaking interruption detection");
-
-        speakingInterruptCheckRef.current = setInterval(() => {
-            if (!VALID_STATUSES.has(statusRef.current)) return;
-
-            const rms = vad.calculateVolume(analyser);
-            ambientRms = ambientRms === 0 ? rms : ambientRms * (1 - AMBIENT_SMOOTHING) + rms * AMBIENT_SMOOTHING;
-            const dynamicThreshold = Math.max(ambientRms + 0.01, 0.015);
-
-            if (rms > dynamicThreshold) {
-                if (!highVolumeStart) highVolumeStart = Date.now();
-                if (Date.now() - highVolumeStart >= INTERRUPT_DURATION) {
-                    console.log("🎤 User speaking detected - interrupting!");
-                    cleanupSpeakingInterruptDetection();
-                    handleInterruption();
-                }
-            } else {
-                highVolumeStart = null;
-            }
-        }, 50);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [vad, recorder.streamRef]);
-
-    /**
-     * Cleanup speaking interrupt detection
-     */
-    const cleanupSpeakingInterruptDetection = useCallback(() => {
-        if (speakingInterruptCheckRef.current) {
-            clearInterval(speakingInterruptCheckRef.current);
-            speakingInterruptCheckRef.current = null;
-            console.log("🛑 Speaking interruption detection cleared");
-        }
-    }, []);
-
-    /**
-     * Handle interruption
-     */
-    const handleInterruption = useCallback(() => {
-        console.log("🛑 Interruption detected!");
-
-        activeTurnIdRef.current += 1;
-        tts.stopAll();
-        cleanupSpeakingInterruptDetection();
-        n8nStream.abort();
-
-        assistantTextBufferRef.current = "";
-        pendingTextUpdateRef.current = false;
-        setCurrentAssistantText("");
-        setProcessingStage("");
-        setStatus("listening");
-        startListening();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [tts, n8nStream, cleanupSpeakingInterruptDetection]);
 
     /**
      * Manual interruption trigger (UI button)
@@ -191,7 +179,7 @@ export function useVoiceMode() {
     const startListening = useCallback(async () => {
         try {
             vad.resetSpeechDetection();
-            await vad.resumeAudioContext();
+            await vad.resumeAudioContext(); // Use shared context resume
 
             const stream = await recorder.startRecording(
                 null, // onDataAvailable
@@ -228,135 +216,156 @@ export function useVoiceMode() {
     /**
      * Process recording
      */
-    const processRecording = useCallback(async (audioBlob) => {
-        console.log(`📝 Processing recording: ${audioBlob.size} bytes`);
-
-        if (!vad.hasSpeechDetected()) {
-            console.log("⚠️ No clear speech detected");
-            setStatus("listening");
-            await startListening();
-            return;
-        }
-
-        setStatus("thinking");
-        setProcessingStage("transcribing");
-        setUserTranscript("Transcribing...");
-
-        try {
-            const result = await stt.transcribe(audioBlob);
-
-            if (result.filtered || result.text.length === 0) {
-                console.log("⚠️ Empty or filtered transcript");
+    const processRecording = useCallback(
+        async (audioBlob) => {
+            // OPTIMIZATION: Check for speech before processing
+            if (!vad.hasSpeechDetected()) {
                 setStatus("listening");
-                setProcessingStage("");
-                setUserTranscript("");
-                await startListening();
+
+                // OPTIMIZATION: Prevent tight loop if environment is noisy but below speech threshold
+                // or if just silence caused a stop.
+                // Add a small delay
+                setTimeout(() => {
+                    if (statusRef.current === "listening") {
+                        startListening();
+                    }
+                }, 300);
                 return;
             }
 
-            setUserTranscript(result.text);
-            const newMessages = [...messagesRef.current, { role: "user", text: result.text }];
-            setMessages(newMessages);
-            messagesRef.current = newMessages;
+            setStatus("thinking");
+            setProcessingStage("transcribing");
+            setUserTranscript("Transcribing...");
 
-            setProcessingStage("generating");
-            await handleUserQuery(result.text, newMessages);
-        } catch (err) {
-            console.error("Error processing recording:", err);
-            setError(`Error: ${err.message}`);
-            setStatus("error");
-            setProcessingStage("");
+            try {
+                const result = await stt.transcribe(audioBlob);
 
-            setTimeout(() => {
-                setStatus("listening");
-                setError(null);
-                startListening();
-            }, 3000);
-        }
+                if (result.filtered || result.text.length === 0) {
+                    setStatus("listening");
+                    setProcessingStage("");
+                    setUserTranscript("");
+                    await startListening();
+                    return;
+                }
+
+                setUserTranscript(result.text);
+                const newMessage = conversation.addUserMessage(result.text);
+
+                setProcessingStage("generating");
+                await handleUserQuery(result.text, conversation.messagesRef.current);
+            } catch (err) {
+                console.error("Error processing recording:", err);
+                setError(`Error: ${err.message}`);
+                setStatus("error");
+                setProcessingStage("");
+
+                setTimeout(() => {
+                    setStatus("listening");
+                    setError(null);
+                    startListening();
+                }, 3000);
+            }
+        },
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [stt, vad]);
+        [stt, vad, conversation]
+    );
 
     /**
      * Handle user query
      */
-    const handleUserQuery = useCallback(async (query, currentMessages) => {
-        activeTurnIdRef.current += 1;
-        const myTurn = activeTurnIdRef.current;
-        completedTurnsRef.current.delete(myTurn);
+    const handleUserQuery = useCallback(
+        async (query, currentMessages) => {
+            activeTurnIdRef.current += 1;
+            const myTurn = activeTurnIdRef.current;
+            completedTurnsRef.current.delete(myTurn);
 
-        setStatus("thinking");
-        setCurrentAssistantText("");
-        assistantTextBufferRef.current = "";
+            setStatus("thinking");
+            setCurrentAssistantText("");
+            assistantTextBufferRef.current = "";
+            ttsMarkerBufferRef.current = "";
 
-        // Initialize TTS
-        tts.initializeTTS(myTurn, {
-            onPlaybackStart: () => {
-                console.log("🔊 Audio playback started");
-                setStatus("speaking");
-                if (!speakingInterruptCheckRef.current) {
-                    setupSpeakingInterruptDetection();
-                }
-            },
-            onPlaybackComplete: () => {
-                console.log("✅ All audio playback complete");
-                cleanupSpeakingInterruptDetection();
-                if (statusRef.current === "speaking" && activeTurnIdRef.current === myTurn) {
-                    setStatus("listening");
-                    startListening();
-                }
-            },
-            onAutoplayBlocked: () => {
-                console.warn("⚠️ Autoplay blocked");
-                setNeedsAudioUnlock(true);
-            },
-        });
-
-        // Arm interruption detection as soon as STT is done so barge-in works before audio starts
-        setupSpeakingInterruptDetection();
-
-        // Prepare message context
-        const messageContext = currentMessages.slice(-10).map((msg) => ({
-            role: msg.role,
-            content: msg.text,
-        }));
-
-        try {
-            await n8nStream.streamQuery(query, messageContext, {
-                onTextChunk: (text) => {
-                    if (processingStageRef.current) {
-                        setProcessingStage("");
-                    }
-                    assistantTextBufferRef.current += text;
-                    tts.addText(text);
-
-                    if (!pendingTextUpdateRef.current) {
-                        pendingTextUpdateRef.current = true;
-                        requestAnimationFrame(() => {
-                            setCurrentAssistantText(assistantTextBufferRef.current);
-                            pendingTextUpdateRef.current = false;
-                        });
+            // Initialize TTS
+            tts.initializeTTS(myTurn, {
+                onPlaybackStart: () => {
+                    setStatus("speaking");
+                    // Interruption hook effect picks this up via status dependency
+                },
+                onPlaybackComplete: () => {
+                    if (
+                        statusRef.current === "speaking" &&
+                        activeTurnIdRef.current === myTurn
+                    ) {
+                        setStatus("listening");
+                        startListening();
                     }
                 },
-                onComplete: async () => {
-                    tts.endTextStream();
-                    await finishAssistantResponse(myTurn);
+                onAutoplayBlocked: () => {
+                    console.warn("⚠️ Autoplay blocked");
+                    setNeedsAudioUnlock(true);
                 },
-                checkActive: () => activeTurnIdRef.current === myTurn,
             });
-        } catch (err) {
-            if (err.name === "AbortError") return;
-            console.error("Error handling query:", err);
-            setError(`Error: ${err.message}`);
-            setStatus("error");
 
-            setTimeout(() => {
-                setStatus("listening");
-                setError(null);
-                startListening();
-            }, 3000);
-        }
+            // Prepare message context
+            const messageContext = conversation.getRecentContext();
+
+            try {
+                await n8nStream.streamQuery(query, messageContext, {
+                    onTextChunk: (text) => {
+                        if (processingStageRef.current) {
+                            setProcessingStage("");
+                        }
+                        const displayText = stripPronunciationMarkers(text);
+                        if (displayText) {
+                            console.log(
+                                `💬 Client text chunk [req:${myTurn}]: "${displayText.substring(
+                                    0,
+                                    120
+                                )}..."`
+                            );
+                        }
+                        assistantTextBufferRef.current += displayText;
+                        const ttsText = collectTTSChunk(text);
+                        if (ttsText) {
+                            tts.addText(ttsText);
+                        }
+
+                        if (!pendingTextUpdateRef.current) {
+                            pendingTextUpdateRef.current = true;
+                            requestAnimationFrame(() => {
+                                setCurrentAssistantText(assistantTextBufferRef.current);
+                                pendingTextUpdateRef.current = false;
+                            });
+                        }
+                    },
+                    onComplete: async () => {
+                        flushTTSMarkerBuffer();
+                        tts.endTextStream();
+                        await finishAssistantResponse(myTurn);
+                    },
+                    checkActive: () => activeTurnIdRef.current === myTurn,
+                });
+            } catch (err) {
+                if (err.name === "AbortError") return;
+                console.error("Error handling query:", err);
+                setError(`Error: ${err.message}`);
+                setStatus("error");
+
+                setTimeout(() => {
+                    setStatus("listening");
+                    setError(null);
+                    startListening();
+                }, 3000);
+            }
+        },
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [tts, n8nStream, setupSpeakingInterruptDetection, cleanupSpeakingInterruptDetection]);
+        [
+            tts,
+            n8nStream,
+            collectTTSChunk,
+            flushTTSMarkerBuffer,
+            conversation
+        ]
+    );
 
     /**
      * Finish assistant response
@@ -371,7 +380,7 @@ export function useVoiceMode() {
         const fullText = assistantTextBufferRef.current.trim();
 
         if (fullText.length > 0) {
-            setMessages((prev) => [...prev, { role: "assistant", text: fullText }]);
+            conversation.addAssistantMessage(fullText);
         }
 
         assistantTextBufferRef.current = "";
@@ -384,13 +393,12 @@ export function useVoiceMode() {
         const hasAudioToPlay = tts.isPlaying() || tts.getQueueSize() > 0;
 
         if (!hasAudioToPlay) {
-            console.log("✅ No audio to play, returning to listening");
             if (myTurn && activeTurnIdRef.current !== myTurn) return;
             setStatus("listening");
             await startListening();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [tts]);
+    }, [tts, conversation]);
 
     /**
      * Start voice mode
@@ -409,7 +417,7 @@ export function useVoiceMode() {
             await tts.primeAudio();
             setNeedsAudioUnlock(false);
 
-            setMessages([]);
+            conversation.clearMessages();
             setCurrentAssistantText("");
             setUserTranscript("Listening... Just speak naturally!");
 
@@ -420,7 +428,7 @@ export function useVoiceMode() {
             setStatus("error");
             setNeedsAudioUnlock(true);
         }
-    }, [unlockSafariAudio, tts, startListening, ttsProvider]);
+    }, [unlockSafariAudio, tts, startListening, ttsProvider, conversation]);
 
     /**
      * Handle audio unlock retry
@@ -466,6 +474,7 @@ export function useVoiceMode() {
         n8nStream.cleanup();
         cleanupSpeakingInterruptDetection();
         assistantTextBufferRef.current = "";
+        ttsMarkerBufferRef.current = "";
         pendingTextUpdateRef.current = false;
     }, [vad, recorder, tts, n8nStream, cleanupSpeakingInterruptDetection]);
 
@@ -475,7 +484,7 @@ export function useVoiceMode() {
         processingStage,
         volume,
         error,
-        messages,
+        messages: conversation.messages,
         currentAssistantText,
         userTranscript,
         needsAudioUnlock,

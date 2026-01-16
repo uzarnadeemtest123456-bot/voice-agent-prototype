@@ -178,8 +178,6 @@ export async function POST(request) {
             ext === 'mp3' ? 'audio/mpeg' :
               'audio/webm');
 
-    console.log(`🎙️ STT processing: ${audioFile.size} bytes, type: ${audioType || '(none)'}, using: ${fileName} (${forcedMime})`);
-
     const file = new File([audioFile], fileName, { type: forcedMime });
 
     // Transcribe using Whisper with temperature=0 to reduce hallucinations
@@ -192,11 +190,8 @@ export async function POST(request) {
       // prompt: "Transcribe the following audio. If there is no speech, return empty." // Can help but may introduce bias
     });
 
-    console.log('Whisper raw transcription:', transcription.text);
-
     // Filter out hallucinations
     if (isLikelyHallucination(transcription.text)) {
-      console.log('⚠️ Detected hallucination, returning empty string');
       return NextResponse.json({
         text: '',
         success: true,

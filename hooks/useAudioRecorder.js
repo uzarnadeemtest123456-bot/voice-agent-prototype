@@ -56,12 +56,10 @@ export function useAudioRecorder() {
         async (onDataAvailable, onStop) => {
             // Prevent double starts
             if (isStartingRef.current) {
-                console.log("⚠️ Already starting recording, skipping");
                 return null;
             }
 
             if (mediaRecorderRef.current?.state === "recording") {
-                console.log("⚠️ Already recording, skipping");
                 return streamRef.current;
             }
 
@@ -102,7 +100,6 @@ export function useAudioRecorder() {
                 };
 
                 mediaRecorder.start(100); // Collect data every 100ms
-                console.log("🎙️ Recording started");
 
                 return stream;
             } finally {

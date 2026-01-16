@@ -2,6 +2,8 @@
 
 import { useRef, useCallback } from "react";
 
+import { getAudioContext } from "@/lib/audioContext";
+
 /**
  * Custom hook for Voice Activity Detection using Web Audio API
  * Detects silence and speech thresholds to auto-stop recording
@@ -28,8 +30,11 @@ export function useVoiceActivityDetection() {
 
         // Create or reuse AudioContext
         if (!audioContextRef.current || audioContextRef.current.state === "closed") {
-            audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-            micAnalyserConnectedRef.current = false;
+            const ctx = getAudioContext();
+            if (ctx) {
+                audioContextRef.current = ctx;
+                micAnalyserConnectedRef.current = false;
+            }
         }
 
         // Resume if needed
@@ -135,7 +140,6 @@ export function useVoiceActivityDetection() {
                     const silenceDuration = Date.now() - silenceStartRef.current;
 
                     if (silenceDuration > SILENCE_DURATION_MS && hasSpeechDetectedRef.current) {
-                        console.log("🔇 Speech detected + silence for 1s, triggering callback");
                         stopVAD();
                         onSilenceDetected?.();
                     }
@@ -178,7 +182,7 @@ export function useVoiceActivityDetection() {
         }
 
         if (audioContextRef.current) {
-            audioContextRef.current.close();
+            // Do not close the singleton context! Just release the ref.
             audioContextRef.current = null;
         }
 

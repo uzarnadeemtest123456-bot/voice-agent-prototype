@@ -72,7 +72,6 @@ export function useN8nStream() {
 
             while (true) {
                 if (!callbacks.checkActive?.()) {
-                    console.log("⚠️ SSE stream abandoned (interrupted)");
                     clearTimeout(streamTimeout);
                     return;
                 }
@@ -113,7 +112,6 @@ export function useN8nStream() {
         } catch (err) {
             clearTimeout(streamTimeout);
             if (err.name === "AbortError") {
-                console.log("⚠️ SSE stream aborted");
                 return;
             }
             throw err;
@@ -142,7 +140,6 @@ export function useN8nStream() {
         try {
             while (true) {
                 if (!callbacks.checkActive?.()) {
-                    console.log("⚠️ JSON stream abandoned (interrupted)");
                     resetTimeout();
                     return;
                 }
@@ -201,7 +198,6 @@ export function useN8nStream() {
         } catch (err) {
             resetTimeout();
             if (err.name === "AbortError") {
-                console.log("⚠️ JSON stream aborted");
                 return;
             }
             throw err;

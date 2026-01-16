@@ -319,7 +319,7 @@ Edit `components/VoiceModeUI.jsx` → `callBrainWebhook()`:
 ```javascript
 body: JSON.stringify({
   query: userText,
-  knowledge_model: 23,  // Your model ID
+  knowledge_model: 21,  // Your model ID
   country: "CA",        // Your country code
   // Add custom fields here
 })
