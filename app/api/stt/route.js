@@ -6,6 +6,8 @@
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { isLikelyHallucination, logHallucinationDetection } from '@/lib/hallucinationDetector';
+import { HALLUCINATION_CONFIG } from '@/lib/hallucinationConfig';
 
 // Simple rate limiting
 const requestCounts = new Map();
@@ -48,54 +50,6 @@ function cleanupExpiredEntries(now) {
       requestCounts.delete(key);
     }
   }
-}
-
-// Common Whisper hallucinations when there's silence or background noise
-const HALLUCINATION_PATTERNS = [
-  /^thank you\.?$/i,
-  /^thanks\.?$/i,
-  /^yes\.?$/i,
-  /^yeah\.?$/i,
-  /^yep\.?$/i,
-  /^okay\.?$/i,
-  /^ok\.?$/i,
-  /^bye\.?$/i,
-  /^goodbye\.?$/i,
-  /^hello\.?$/i,
-  /^hi\.?$/i,
-  /^hmm\.?$/i,
-  /^uh\.?$/i,
-  /^um\.?$/i,
-  /^ah\.?$/i,
-  /^oh\.?$/i,
-  /^you\.?$/i,
-  /^\s*$/,
-  /^\.+$/,
-  /^thank you for watching\.?$/i,
-  /^thanks for watching\.?$/i,
-  /^subscribe\.?$/i,
-  /^please subscribe\.?$/i,
-  /^subtitles by.*$/i,
-  /^\[.*\]$/,
-  /^\(.*\)$/,
-];
-
-function isLikelyHallucination(text) {
-  const trimmed = text.trim();
-
-  // Empty or very short
-  if (trimmed.length === 0 || trimmed.length < 2) {
-    return true;
-  }
-
-  // Check against hallucination patterns
-  for (const pattern of HALLUCINATION_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 export async function POST(request) {
@@ -186,16 +140,23 @@ export async function POST(request) {
       model: 'whisper-1',
       language: 'en',
       response_format: 'json',
-      temperature: 0.0, // Lower temperature = less creative/hallucinatory
-      // prompt: "Transcribe the following audio. If there is no speech, return empty." // Can help but may introduce bias
+      temperature: HALLUCINATION_CONFIG.WHISPER_TEMPERATURE,
     });
 
+    // Comprehensive hallucination detection
+    const detectionResult = isLikelyHallucination(transcription.text, audioFile);
+    
+    // Log detection for debugging
+    logHallucinationDetection(transcription.text, detectionResult, audioFile.size);
+
     // Filter out hallucinations
-    if (isLikelyHallucination(transcription.text)) {
+    if (detectionResult.isHallucination) {
       return NextResponse.json({
         text: '',
         success: true,
-        filtered: true
+        filtered: true,
+        reason: detectionResult.reason,
+        detail: HALLUCINATION_CONFIG.ENABLE_DEBUG_LOGGING ? detectionResult.detail : undefined
       });
     }
 
