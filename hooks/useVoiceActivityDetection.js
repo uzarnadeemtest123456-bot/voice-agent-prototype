@@ -5,22 +5,14 @@ import { useRef, useCallback } from "react";
 import { getAudioContext } from "@/lib/audioContext";
 
 /**
- * Custom hook for Voice Activity Detection using Web Audio API
- * Detects silence and speech thresholds to auto-stop recording
+ * Audio level helper using Web Audio API
+ * Provides analyser access for manual volume checks
  */
 export function useVoiceActivityDetection() {
     const audioContextRef = useRef(null);
     const analyserRef = useRef(null);
     const micSourceRef = useRef(null);
     const micAnalyserConnectedRef = useRef(false);
-    const volumeCheckIntervalRef = useRef(null);
-    const silenceStartRef = useRef(null);
-    const hasSpeechDetectedRef = useRef(false);
-
-    // Thresholds
-    const SILENCE_THRESHOLD = 0.01;
-    const SPEECH_THRESHOLD = 0.03;
-    const SILENCE_DURATION_MS = 1000;
 
     /**
      * Ensure analyser is connected to stream
@@ -90,87 +82,9 @@ export function useVoiceActivityDetection() {
     }, []);
 
     /**
-     * Stop VAD monitoring (keeps AudioContext for barge-in)
-     * NOTE: Defined before startVAD to avoid hoisting issues
-     */
-    const stopVAD = useCallback(() => {
-        if (volumeCheckIntervalRef.current) {
-            clearInterval(volumeCheckIntervalRef.current);
-            volumeCheckIntervalRef.current = null;
-        }
-        silenceStartRef.current = null;
-    }, []);
-
-    /**
-     * Start VAD monitoring
-     * @param {MediaStream} stream - Audio stream to monitor
-     * @param {Object} callbacks - { onVolumeChange, onSilenceDetected, shouldCheck }
-     */
-    const startVAD = useCallback(
-        (stream, { onVolumeChange, onSilenceDetected, shouldCheck }) => {
-            const analyser = ensureAnalyser(stream);
-            if (!analyser) {
-                console.warn("No analyser available for VAD");
-                return;
-            }
-
-            hasSpeechDetectedRef.current = false;
-            silenceStartRef.current = null;
-
-            volumeCheckIntervalRef.current = setInterval(() => {
-                // Only check when allowed (e.g., when listening)
-                if (shouldCheck && !shouldCheck()) return;
-
-                const volume = calculateVolume(analyser);
-
-                // Notify volume change for UI
-                onVolumeChange?.(volume * 2); // Amplified for visual effect
-
-                // Track speech detection
-                if (volume > SPEECH_THRESHOLD) {
-                    hasSpeechDetectedRef.current = true;
-                }
-
-                // Check for silence
-                if (volume < SILENCE_THRESHOLD) {
-                    if (!silenceStartRef.current) {
-                        silenceStartRef.current = Date.now();
-                    }
-
-                    const silenceDuration = Date.now() - silenceStartRef.current;
-
-                    if (silenceDuration > SILENCE_DURATION_MS && hasSpeechDetectedRef.current) {
-                        stopVAD();
-                        onSilenceDetected?.();
-                    }
-                } else {
-                    silenceStartRef.current = null;
-                }
-            }, 100);
-        },
-        [ensureAnalyser, calculateVolume, stopVAD]
-    );
-
-    /**
-     * Check if speech was detected
-     */
-    const hasSpeechDetected = useCallback(() => {
-        return hasSpeechDetectedRef.current;
-    }, []);
-
-    /**
-     * Reset speech detection flag
-     */
-    const resetSpeechDetection = useCallback(() => {
-        hasSpeechDetectedRef.current = false;
-    }, []);
-
-    /**
      * Full cleanup - closes AudioContext
      */
     const cleanup = useCallback(() => {
-        stopVAD();
-
         if (micSourceRef.current) {
             try {
                 micSourceRef.current.disconnect();
@@ -187,10 +101,10 @@ export function useVoiceActivityDetection() {
         }
 
         analyserRef.current = null;
-    }, [stopVAD]);
+    }, []);
 
     /**
-     * Get the analyser for external use (e.g., speaking interrupt detection)
+     * Get the analyser for external use (e.g., volume monitoring)
      */
     const getAnalyser = useCallback(
         (stream) => {
@@ -209,10 +123,6 @@ export function useVoiceActivityDetection() {
     }, []);
 
     return {
-        startVAD,
-        stopVAD,
-        hasSpeechDetected,
-        resetSpeechDetection,
         cleanup,
         getAnalyser,
         resumeAudioContext,

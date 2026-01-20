@@ -11,11 +11,8 @@ export default function ConversationPanel({
     messages,
     currentAssistantText,
     processingStage,
-    status,
-    onInterrupt,
 }) {
     const messagesEndRef = useRef(null);
-    const isSpeaking = status === "speaking";
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -26,16 +23,6 @@ export default function ConversationPanel({
         <div className="w-96 bg-gray-800/50 backdrop-blur rounded-2xl p-6 flex flex-col">
             <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-white">Conversation</h3>
-                {isSpeaking && (
-                    <button
-                        onClick={() => onInterrupt?.()}
-                        className="inline-flex items-center gap-2 px-3 py-2 rounded-full text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 transition-all shadow-lg hover:shadow-purple-500/40 border border-white/10"
-                        aria-label="Interrupt speech"
-                    >
-                        <span className="text-lg leading-none">■</span>
-                        <span>Stop</span>
-                    </button>
-                )}
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">

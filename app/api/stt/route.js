@@ -6,8 +6,6 @@
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import { isLikelyHallucination, logHallucinationDetection } from '@/lib/hallucinationDetector';
-import { HALLUCINATION_CONFIG } from '@/lib/hallucinationConfig';
 
 // Simple rate limiting
 const requestCounts = new Map();
@@ -15,6 +13,7 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 const MAX_REQUESTS_PER_WINDOW = 30; // Max 30 STT requests per minute
 
 const MAX_MAP_SIZE = 10000; // Safety cap to prevent OOM
+const MIN_AUDIO_SIZE_BYTES = 10000;
 
 function checkRateLimit(identifier) {
   const now = Date.now();
@@ -88,6 +87,15 @@ export async function POST(request) {
       );
     }
 
+    if (audioFile.size < MIN_AUDIO_SIZE_BYTES) {
+      return NextResponse.json({
+        text: '',
+        success: true,
+        filtered: true,
+        reason: 'audio_too_small',
+      });
+    }
+
     const openai = new OpenAI({ apiKey });
 
     // Detect audio format more robustly
@@ -140,23 +148,16 @@ export async function POST(request) {
       model: 'whisper-1',
       language: 'en',
       response_format: 'json',
-      temperature: HALLUCINATION_CONFIG.WHISPER_TEMPERATURE,
+      temperature: 0.0,
     });
 
-    // Comprehensive hallucination detection
-    const detectionResult = isLikelyHallucination(transcription.text, audioFile);
-    
-    // Log detection for debugging
-    logHallucinationDetection(transcription.text, detectionResult, audioFile.size);
-
-    // Filter out hallucinations
-    if (detectionResult.isHallucination) {
+    // Minimal guard for empty or accidental recordings
+    if (!transcription.text.trim()) {
       return NextResponse.json({
         text: '',
         success: true,
         filtered: true,
-        reason: detectionResult.reason,
-        detail: HALLUCINATION_CONFIG.ENABLE_DEBUG_LOGGING ? detectionResult.detail : undefined
+        reason: 'empty_transcript',
       });
     }
 

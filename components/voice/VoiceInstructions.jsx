@@ -7,13 +7,13 @@ export default function VoiceInstructions() {
     return (
         <div className="text-center text-sm text-gray-500 space-y-2">
             <p className="text-base font-semibold text-gray-300">
-                Click Start and speak naturally!
+                Click Start, then hold to talk.
             </p>
             <p className="text-sm text-green-400">
-                ✓ Auto-detects when you stop speaking (1s silence)
+                ✓ Release the button to send your message
             </p>
             <p className="text-xs text-gray-400">
-                No need to press any button - just stop talking!
+                Hold to interrupt the AI and ask a new question anytime.
             </p>
             <p className="text-xs mt-2 text-gray-600">
                 Whisper STT + n8n Intelligence

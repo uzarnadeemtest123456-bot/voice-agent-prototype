@@ -6,4 +6,3 @@ export { useSTT } from "./useSTT";
 export { useN8nStream } from "./useN8nStream";
 export { useVoiceMode } from "./useVoiceMode";
 export { useConversation } from "./useConversation";
-export { useVoiceInterruption } from "./useVoiceInterruption";

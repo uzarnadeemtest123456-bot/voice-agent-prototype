@@ -25,10 +25,12 @@ export default function VoiceModeUI() {
     needsAudioUnlock,
     startVoiceMode,
     handleAudioUnlockRetry,
-    interruptSpeaking,
     isActive,
+    isRecording,
     ttsProvider,
     setTtsProvider,
+    startPushToTalk,
+    stopPushToTalk,
   } = useVoiceMode();
 
   return (
@@ -46,6 +48,9 @@ export default function VoiceModeUI() {
             needsAudioUnlock={needsAudioUnlock}
             onStart={startVoiceMode}
             onAudioUnlock={handleAudioUnlockRetry}
+            onPushToTalkStart={startPushToTalk}
+            onPushToTalkEnd={stopPushToTalk}
+            isRecording={isRecording}
           />
 
           <div className="mt-8 transition-all duration-300 transform">
@@ -65,8 +70,6 @@ export default function VoiceModeUI() {
             messages={messages}
             currentAssistantText={currentAssistantText}
             processingStage={processingStage}
-            status={status}
-            onInterrupt={interruptSpeaking}
           />
         )}
       </div>

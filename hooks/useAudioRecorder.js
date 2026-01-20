@@ -96,6 +96,8 @@ export function useAudioRecorder() {
                             type: audioChunksRef.current[0]?.type || "audio/webm",
                         });
                         onStop?.(audioBlob);
+                    } else {
+                        onStop?.(null);
                     }
                 };
 
@@ -116,20 +118,6 @@ export function useAudioRecorder() {
         if (mediaRecorderRef.current?.state === "recording") {
             mediaRecorderRef.current.stop();
         }
-    }, []);
-
-    /**
-     * Get current audio chunks
-     */
-    const getAudioChunks = useCallback(() => {
-        return audioChunksRef.current;
-    }, []);
-
-    /**
-     * Clear audio chunks
-     */
-    const clearChunks = useCallback(() => {
-        audioChunksRef.current = [];
     }, []);
 
     /**
@@ -154,8 +142,6 @@ export function useAudioRecorder() {
     return {
         startRecording,
         stopRecording,
-        getAudioChunks,
-        clearChunks,
         cleanup,
         isRecording,
         streamRef,

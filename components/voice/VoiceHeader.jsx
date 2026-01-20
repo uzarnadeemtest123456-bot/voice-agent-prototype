@@ -10,7 +10,9 @@ export default function VoiceHeader({ status, error }) {
             case "idle":
                 return "Click Start to begin your conversation";
             case "listening":
-                return "Listening... (Auto-detects speech + 1.5s silence)";
+                return "Hold the button to talk";
+            case "recording":
+                return "Recording... release to send";
             case "thinking":
                 return "Processing...";
             case "speaking":
