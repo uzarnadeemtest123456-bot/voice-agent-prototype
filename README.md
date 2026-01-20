@@ -11,7 +11,7 @@ User Speech
     ↓
 [n8n Webhook] ← Handles all queries, streams responses
     ↓
-[ElevenLabs TTS] ← Natural, emotional speech (no stuttering)
+[TTS (ElevenLabs or Minimax)] ← Natural or low-latency speech
     ↓
 User Hears Response
 ```
@@ -24,10 +24,8 @@ User Hears Response
 - Records audio using standard MediaRecorder API
 - High accuracy transcription
 
-### 2. **Simplified Query Flow**
-- ❌ **Removed:** Intent classification logic
-- ❌ **Removed:** Separate rephrase API call
-- ✅ **New:** Direct Whisper STT → n8n
+### 2. **Query Flow**
+- Direct Whisper STT → n8n
 - Whisper prompt handles brand name accuracy (TuxMat, etc.)
 - All responses come from n8n (streaming supported)
 
@@ -37,6 +35,10 @@ User Hears Response
 - **Minimax:** Ultra-low latency, cost-effective high speed generation
 - User-selectable provider from the UI interface
 - Streaming support for both providers
+
+## 🔐 API Keys Notice
+
+This project requires external API keys. **Use your own API keys** for OpenAI, ElevenLabs, and Minimax. Never commit real keys to GitHub; keep them in `.env.local` and rotate them immediately if exposed.
 
 ## 🚀 Setup Instructions
 
@@ -48,15 +50,22 @@ User Hears Response
 - Minimax API key (optional, for low-latency TTS)
 - n8n webhook URL configured
 
-### 1. Install Dependencies
+### 1. Clone the Repo
+
+```bash
+git clone <your-repo-url>
+cd voice_agent
+```
+
+### 2. Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 2. Configure Environment Variables
+### 3. Configure Environment Variables
 
-Create/update `.env.local`:
+Create/update `.env.local` (use your own API keys):
 
 ```bash
 # n8n Brain Webhook URL (streaming endpoint)
@@ -88,7 +97,7 @@ MINIMAX_VOICE_ID=male-qn-qingse
 
 ```
 
-### 3. Get API Keys
+### 4. Get API Keys
 
 #### OpenAI API Key
 1. Visit https://platform.openai.com/api-keys
@@ -113,7 +122,16 @@ MINIMAX_VOICE_ID=male-qn-qingse
 - Bella (EXAVITQu4vr4xnSDxMaL) - Expressive, youthful
 - Josh (TxGEqnHWrfWFTfGW9XjX) - Deep, authoritative male voice
 
-### 4. Run Development Server
+#### Minimax API Key
+1. Visit https://platform.minimax.io/
+2. Create an API key and Group ID
+3. Add `MINIMAX_API_KEY` and `MINIMAX_GROUP_ID` to `.env.local`
+
+#### Choose Minimax Voice (Optional)
+1. Pick a voice ID from the Minimax dashboard
+2. Set `MINIMAX_VOICE_ID` in `.env.local`
+
+### 5. Run Development Server
 
 ```bash
 npm run dev
@@ -147,7 +165,7 @@ Visit http://localhost:3000/voice
    → n8n processes and streams response
 
 5. Response converted to speech
-   → ElevenLabs generates natural audio
+   → Selected TTS provider (ElevenLabs or Minimax) generates audio
    → Plays immediately as chunks arrive
    → User hears smooth, natural response
 ```
@@ -155,21 +173,27 @@ Visit http://localhost:3000/voice
 ## 📁 Project Structure
 
 ```
-vapi_voice_test/
+voice_agent/
 ├── app/
 │   ├── api/
 │   │   ├── stt/
 │   │   │   └── route.js           # Whisper STT with context prompts
-│   │   ├── tts/
-│   │   │   └── route.js           # MiniMax TTS with streaming
-│   │   ├── rephrase/
-│   │   │   └── route.js           # [NOT USED] Legacy rephrase logic
-│   │   └── chat/intent/
-│   │       └── route.js           # [NOT USED] Legacy intent logic
+│   │   └── tts/
+│   │       ├── elevenlabs/
+│   │       │   └── route.js       # ElevenLabs TTS streaming
+│   │       └── minimax/
+│   │           └── route.js       # Minimax TTS streaming
+│   ├── favicon.ico
+│   ├── globals.css
+│   ├── layout.js
 │   └── voice/
+│       ├── error.jsx
+│       ├── loading.jsx
 │       └── page.jsx               # Voice mode page
 ├── components/
 │   └── VoiceModeUI.jsx            # Main voice interface component
+├── hooks/
+│   └── useVoiceMode.js            # Voice mode state + handlers
 ├── lib/
 │   ├── audioPlayer.js             # Audio playback queue manager
 │   ├── audioLevel.js              # Breathing animation helper
@@ -210,6 +234,14 @@ vapi_voice_test/
 2. Add to `.env.local`
 3. Restart dev server
 
+### Minimax API Error
+**Problem:** "MINIMAX_API_KEY not configured"
+
+**Solution:**
+1. Get API key and Group ID from https://platform.minimax.io/
+2. Add to `.env.local`
+3. Restart dev server
+
 ### Microphone Not Working
 **Problem:** "Could not access microphone"
 
@@ -234,25 +266,6 @@ vapi_voice_test/
 2. Ensure n8n workflow is active
 3. Check n8n logs for errors
 
-## 🆚 What Changed?
-
-### Old Architecture (Browser-Dependent)
-```
-Browser STT (WebKit) → Intent Classification → OpenAI/n8n → OpenAI TTS
-❌ Only worked on Chrome/Edge/Safari
-❌ Complex intent routing logic
-❌ OpenAI TTS stutters
-```
-
-### New Architecture (Universal & Optimized)
-```
-Whisper STT with Prompt → n8n → ElevenLabs TTS
-✅ Works on ALL browsers
-✅ Simple, direct flow (no extra API calls)
-✅ Superior voice quality
-✅ Faster response time
-```
-
 ## 💰 Cost Estimation
 
 ### Per Conversation (Avg 10 exchanges):
@@ -266,8 +279,11 @@ Whisper STT with Prompt → n8n → ElevenLabs TTS
 - Paid: ~$0.30 per 1,000 characters
 - 10 responses × 100 chars = 1,000 chars = **~$0.30**
 
+**Minimax (TTS):**
+- Pricing and quotas depend on your Minimax plan
+- Good option when you want lower latency
+
 **Total per conversation:** ~$0.303 (mostly TTS)
-**Savings:** Eliminated separate rephrase API calls = faster + cheaper!
 
 **Optimization tips:**
 - Use ElevenLabs free tier (10k chars/month = ~100 responses)
@@ -347,6 +363,9 @@ Ensure these are set in your deployment platform:
 - `OPENAI_API_KEY`
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID` (optional)
+- `MINIMAX_API_KEY`
+- `MINIMAX_GROUP_ID`
+- `MINIMAX_VOICE_ID` (optional)
 
 ## 📄 License
 
@@ -360,6 +379,7 @@ Contributions welcome! Please open an issue or submit a pull request.
 
 - [OpenAI Whisper API](https://platform.openai.com/docs/guides/speech-to-text)
 - [ElevenLabs Documentation](https://docs.elevenlabs.io/)
+- [Minimax Documentation](https://platform.minimax.io/)
 - [Next.js Documentation](https://nextjs.org/docs)
 - [n8n Webhooks](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/)
 

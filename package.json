@@ -1,5 +1,5 @@
 {
-  "name": "vapi_voice_test",
+  "name": "voice_agent",
   "version": "0.1.0",
   "private": true,
   "scripts": {
