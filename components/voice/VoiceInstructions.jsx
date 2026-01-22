@@ -16,7 +16,7 @@ export default function VoiceInstructions() {
                 Hold to interrupt the AI and ask a new question anytime.
             </p>
             <p className="text-xs mt-2 text-gray-600">
-                Whisper STT + n8n Intelligence
+                Whisper STT + AIP Intelligence
             </p>
         </div>
     );

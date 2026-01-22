@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 
 export const metadata = {
   title: "Voice AI Assistant",
-  description: "Real-time voice conversation with AI powered by Whisper, ElevenLabs, and n8n",
+  description: "Real-time voice conversation with AI powered by Whisper, ElevenLabs, and AIP",
 };
 
 export const viewport = {

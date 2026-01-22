@@ -9,7 +9,7 @@ User Speech
     ↓
 [Whisper STT with Prompt] ← Works on ALL browsers + handles brand names accurately
     ↓
-[n8n Webhook] ← Handles all queries, streams responses
+[AIP ActionCable] ← Handles all queries, streams responses
     ↓
 [TTS (ElevenLabs or Minimax)] ← Natural or low-latency speech
     ↓
@@ -25,9 +25,9 @@ User Hears Response
 - High accuracy transcription
 
 ### 2. **Query Flow**
-- Direct Whisper STT → n8n
+- Direct Whisper STT → AIP
 - Whisper prompt handles brand name accuracy (TuxMat, etc.)
-- All responses come from n8n (streaming supported)
+- All responses come from AIP (streaming supported)
 
 ### 3. **Flexible Text-to-Speech (TTS)**
 - ✅ **New:** Support for both **ElevenLabs** and **Minimax**
@@ -48,7 +48,8 @@ This project requires external API keys. **Use your own API keys** for OpenAI, E
 - OpenAI API key (for Whisper STT with context prompts)
 - ElevenLabs API key (optional, for high-quality TTS)
 - Minimax API key (optional, for low-latency TTS)
-- n8n webhook URL configured
+- AIP ActionCable URL configured
+- AIP model ID configured
 
 ### 1. Clone the Repo
 
@@ -68,8 +69,10 @@ npm install
 Create/update `.env.local` (use your own API keys):
 
 ```bash
-# n8n Brain Webhook URL (streaming endpoint)
-NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL=your_n8n_webhook_url_here
+# AIP ActionCable Configuration (client-side)
+# Example: ws://localhost:3001/cable
+NEXT_PUBLIC_AIP_CABLE_URL=ws://localhost:3001/cable
+NEXT_PUBLIC_AIP_MODEL_ID=your_model_id_here
 
 # OpenAI API Configuration
 # Required for: Whisper STT (cross-browser), Query rephrasing/cleanup
@@ -144,7 +147,7 @@ Visit http://localhost:3000/voice
 1. **Click "Start"** - Grants microphone permission and starts recording
 2. **Speak your question** - The app records your audio
 3. **Click "Stop Speaking"** - Stops recording and processes your query
-4. **Wait for response** - Query is transcribed → cleaned → sent to n8n → spoken back
+4. **Wait for response** - Query is transcribed → cleaned → sent to AIP → spoken back
 
 ### User Flow:
 
@@ -161,8 +164,8 @@ Visit http://localhost:3000/voice
    → Audio sent to Whisper API with context prompt
    → Whisper accurately transcribes: "what are TuxMat mats made of"
 
-4. Transcribed query sent directly to n8n
-   → n8n processes and streams response
+4. Transcribed query sent directly to AIP
+   → AIP processes and streams response
 
 5. Response converted to speech
    → Selected TTS provider (ElevenLabs or Minimax) generates audio
@@ -193,12 +196,12 @@ voice_agent/
 ├── components/
 │   └── VoiceModeUI.jsx            # Main voice interface component
 ├── hooks/
+│   ├── useAipStream.js            # AIP ActionCable streaming client
 │   └── useVoiceMode.js            # Voice mode state + handlers
 ├── lib/
-│   ├── audioPlayer.js             # Audio playback queue manager
 │   ├── audioLevel.js              # Breathing animation helper
-│   ├── sse.js                     # Server-sent events parser
-│   └── ttsQueue.js                # TTS queue utility
+│   ├── audioQueue.js              # Audio playback queue manager
+│   └── textChunker.js             # Streaming text chunker for TTS
 └── .env.local                     # Environment configuration
 ```
 
@@ -258,13 +261,13 @@ voice_agent/
 2. Ensure you have API credits
 3. Check recording is at least 1 second long
 
-### n8n Webhook Not Responding
-**Problem:** "n8n webhook failed"
+### AIP Cable Not Responding
+**Problem:** "AIP cable failed"
 
 **Solution:**
-1. Verify `NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL` is correct
-2. Ensure n8n workflow is active
-3. Check n8n logs for errors
+1. Verify `NEXT_PUBLIC_AIP_CABLE_URL` is correct
+2. Ensure the AIP server is running and ActionCable is enabled
+3. Check AIP logs for errors
 
 ## 💰 Cost Estimation
 
@@ -329,17 +332,9 @@ voice_settings: {
 }
 ```
 
-### Change n8n Webhook Payload
+### Change AIP Message Payload
 
-Edit `components/VoiceModeUI.jsx` → `callBrainWebhook()`:
-```javascript
-body: JSON.stringify({
-  query: userText,
-  knowledge_model: 21,  // Your model ID
-  country: "CA",        // Your country code
-  // Add custom fields here
-})
-```
+Edit `hooks/useAipStream.js` → `payload` in `streamQuery()` to add custom fields.
 
 ## 🚀 Deployment
 
@@ -359,7 +354,8 @@ vercel
 ### Environment Variables for Production
 
 Ensure these are set in your deployment platform:
-- `NEXT_PUBLIC_N8N_BRAIN_WEBHOOK_URL`
+- `NEXT_PUBLIC_AIP_CABLE_URL`
+- `NEXT_PUBLIC_AIP_MODEL_ID`
 - `OPENAI_API_KEY`
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID` (optional)
@@ -381,7 +377,7 @@ Contributions welcome! Please open an issue or submit a pull request.
 - [ElevenLabs Documentation](https://docs.elevenlabs.io/)
 - [Minimax Documentation](https://platform.minimax.io/)
 - [Next.js Documentation](https://nextjs.org/docs)
-- [n8n Webhooks](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/)
+- [Rails ActionCable](https://guides.rubyonrails.org/action_cable_overview.html)
 
 ---
 

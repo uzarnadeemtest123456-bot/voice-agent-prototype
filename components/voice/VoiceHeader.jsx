@@ -31,7 +31,7 @@ export default function VoiceHeader({ status, error }) {
                 <h1 className="text-4xl font-bold text-white">Voice Mode</h1>
                 <p className="text-gray-400">{getStatusText()}</p>
                 <p className="text-xs text-gray-500">
-                    Whisper STT + ElevenLabs TTS + n8n Streaming
+                    Whisper STT + ElevenLabs TTS + AIP Streaming
                 </p>
             </div>
 

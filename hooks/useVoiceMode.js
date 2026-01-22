@@ -5,7 +5,7 @@ import { useAudioRecorder } from "./useAudioRecorder";
 import { useVoiceActivityDetection } from "./useVoiceActivityDetection";
 import { useTTS } from "./useTTS";
 import { useSTT } from "./useSTT";
-import { useN8nStream } from "./useN8nStream";
+import { useAipStream } from "./useAipStream";
 import { useConversation } from "./useConversation";
 import { getBreathingScale } from "@/lib/audioLevel";
 import { stripPronunciationMarkers } from "@/lib/pronunciation";
@@ -48,7 +48,7 @@ export function useVoiceMode() {
     const vad = useVoiceActivityDetection();
     const tts = useTTS();
     const stt = useSTT();
-    const n8nStream = useN8nStream();
+    const aipStream = useAipStream();
     const conversation = useConversation();
 
     // Sync state to refs
@@ -66,7 +66,7 @@ export function useVoiceMode() {
 
         activeTurnIdRef.current += 1;
         tts.stopAll();
-        n8nStream.abort();
+        aipStream.abort();
 
         assistantTextBufferRef.current = "";
         ttsMarkerBufferRef.current = "";
@@ -74,7 +74,7 @@ export function useVoiceMode() {
         setCurrentAssistantText("");
         setProcessingStage("");
         setStatus("listening");
-    }, [tts, n8nStream]);
+    }, [tts, aipStream]);
 
 
     // Breathing animation for idle state
@@ -319,7 +319,7 @@ export function useVoiceMode() {
             const messageContext = conversation.getRecentContext();
 
             try {
-                await n8nStream.streamQuery(query, messageContext, {
+                await aipStream.streamQuery(query, messageContext, {
                     onTextChunk: (text) => {
                         if (processingStageRef.current) {
                             setProcessingStage("");
@@ -369,7 +369,7 @@ export function useVoiceMode() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [
             tts,
-            n8nStream,
+            aipStream,
             collectTTSChunk,
             flushTTSMarkerBuffer,
             conversation
@@ -463,12 +463,12 @@ export function useVoiceMode() {
         vad.cleanup();
         recorder.cleanup();
         tts.cleanup();
-        n8nStream.cleanup();
+            aipStream.cleanup();
         assistantTextBufferRef.current = "";
         ttsMarkerBufferRef.current = "";
         pendingTextUpdateRef.current = false;
         speechDurationMsRef.current = 0;
-    }, [vad, recorder, tts, n8nStream, stopVolumeMonitor]);
+    }, [vad, recorder, tts, aipStream, stopVolumeMonitor]);
 
     return {
         // State
