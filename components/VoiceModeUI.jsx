@@ -34,44 +34,63 @@ export default function VoiceModeUI() {
   } = useVoiceMode();
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center p-8">
-      <div className="w-full max-w-7xl h-[90vh] flex gap-8">
-        {/* Left Side - Main Voice Interface */}
-        <div className="flex-1 flex flex-col items-center justify-center space-y-8">
-          <VoiceHeader status={status} error={error} />
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-emerald-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-7xl">
+        {/* Header */}
+        <VoiceHeader status={status} error={error} />
 
-          <VoiceOrb volume={volume} />
+        {/* Main Content Grid */}
+        <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
+          {/* Left Column - Voice Controls */}
+          <div className="lg:col-span-1 flex flex-col gap-4">
+            {/* Voice Orb Card */}
+            <div className="card-effect rounded-2xl p-6">
+              <VoiceOrb volume={volume} isActive={isActive} />
+            </div>
 
-          <VoiceControls
-            status={status}
-            isActive={isActive}
-            needsAudioUnlock={needsAudioUnlock}
-            onStart={startVoiceMode}
-            onAudioUnlock={handleAudioUnlockRetry}
-            onPushToTalkStart={startPushToTalk}
-            onPushToTalkEnd={stopPushToTalk}
-            isRecording={isRecording}
-          />
+            {/* Controls Card */}
+            <div className="card-effect rounded-2xl p-6">
+              <VoiceControls
+                status={status}
+                isActive={isActive}
+                needsAudioUnlock={needsAudioUnlock}
+                onStart={startVoiceMode}
+                onAudioUnlock={handleAudioUnlockRetry}
+                onPushToTalkStart={startPushToTalk}
+                onPushToTalkEnd={stopPushToTalk}
+                isRecording={isRecording}
+              />
+            </div>
 
-          <div className="mt-8 transition-all duration-300 transform">
-            <TTSProviderSelector
-              selectedProvider={ttsProvider}
-              onProviderChange={setTtsProvider}
-              disabled={status !== "idle"}
-            />
+            {/* Provider Selector Card - Only show when NOT active */}
+            {!isActive && (
+              <div className="card-effect rounded-2xl p-6">
+                <TTSProviderSelector
+                  selectedProvider={ttsProvider}
+                  onProviderChange={setTtsProvider}
+                  disabled={status !== "idle"}
+                />
+              </div>
+            )}
           </div>
 
-          {status === "idle" && <VoiceInstructions />}
+          {/* Right Column - Conversation & Instructions */}
+          <div className="lg:col-span-2 flex flex-col gap-4">
+            {isActive ? (
+              <div className="card-effect rounded-2xl p-6 h-[600px]">
+                <ConversationPanel
+                  messages={messages}
+                  currentAssistantText={currentAssistantText}
+                  processingStage={processingStage}
+                />
+              </div>
+            ) : (
+              <div className="card-effect rounded-2xl p-6">
+                <VoiceInstructions />
+              </div>
+            )}
+          </div>
         </div>
-
-        {/* Right Side - Conversation Transcript */}
-        {isActive && (
-          <ConversationPanel
-            messages={messages}
-            currentAssistantText={currentAssistantText}
-            processingStage={processingStage}
-          />
-        )}
       </div>
     </div>
   );

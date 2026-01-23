@@ -6,56 +6,94 @@
  */
 export function TTSProviderSelector({ selectedProvider, onProviderChange, disabled }) {
     return (
-        <div className={`flex flex-col items-center space-y-3 transition-opacity duration-300 ${disabled ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
-            <span className="text-gray-400 text-sm font-medium tracking-wide uppercase">
+        <div className={`space-y-3 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
+            <label className="block text-sm font-semibold text-slate-700 text-center">
                 Voice Provider
-            </span>
+            </label>
 
-            <div className="flex bg-gray-800/50 backdrop-blur-sm p-1 rounded-xl border border-gray-700/50 shadow-lg relative">
-                {/* Sliding background */}
-                <div
-                    className={`absolute top-1 bottom-1 w-[calc(50%-4px)] bg-indigo-500 rounded-lg shadow-md transition-all duration-300 ease-out ${selectedProvider === 'minimax' ? 'translate-x-[calc(100%+8px)]' : 'translate-x-0'
-                        }`}
-                />
-
+            <div className="grid grid-cols-2 gap-3">
                 <button
                     onClick={() => onProviderChange("elevenlabs")}
                     disabled={disabled}
-                    className={`relative z-10 px-6 py-2 rounded-lg text-sm font-medium transition-colors duration-200 min-w-[140px] flex items-center justify-center gap-2 ${selectedProvider === "elevenlabs" ? "text-white" : "text-gray-400 hover:text-gray-200"
-                        }`}
+                    className={`p-4 rounded-xl border-2 transition-all ${
+                        selectedProvider === "elevenlabs"
+                            ? "border-blue-600 bg-blue-50 shadow-sm"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                    }`}
                 >
-                    <span>ElevenLabs</span>
-                    {selectedProvider === "elevenlabs" && (
-                        <span className="flex h-2 w-2 relative">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-white"></span>
-                        </span>
-                    )}
+                    <div className="flex flex-col items-center gap-2">
+                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                            selectedProvider === "elevenlabs" 
+                                ? "bg-blue-600 text-white" 
+                                : "bg-slate-100 text-slate-600"
+                        }`}>
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
+                            </svg>
+                        </div>
+                        <div className="text-center">
+                            <div className={`text-sm font-semibold ${
+                                selectedProvider === "elevenlabs" ? "text-blue-900" : "text-slate-700"
+                            }`}>
+                                ElevenLabs
+                            </div>
+                            <div className="text-xs text-slate-500 mt-1">
+                                Expressive
+                            </div>
+                        </div>
+                        {selectedProvider === "elevenlabs" && (
+                            <div className="flex items-center gap-1 text-xs text-blue-600 font-medium">
+                                <div className="w-1.5 h-1.5 rounded-full bg-blue-600"></div>
+                                Active
+                            </div>
+                        )}
+                    </div>
                 </button>
 
                 <button
                     onClick={() => onProviderChange("minimax")}
                     disabled={disabled}
-                    className={`relative z-10 px-6 py-2 rounded-lg text-sm font-medium transition-colors duration-200 min-w-[140px] flex items-center justify-center gap-2 ${selectedProvider === "minimax" ? "text-white" : "text-gray-400 hover:text-gray-200"
-                        }`}
+                    className={`p-4 rounded-xl border-2 transition-all ${
+                        selectedProvider === "minimax"
+                            ? "border-emerald-600 bg-emerald-50 shadow-sm"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                    }`}
                 >
-                    <span>Minimax</span>
-                    {selectedProvider === "minimax" && (
-                        <span className="flex h-2 w-2 relative">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-white"></span>
-                        </span>
-                    )}
+                    <div className="flex flex-col items-center gap-2">
+                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                            selectedProvider === "minimax" 
+                                ? "bg-emerald-600 text-white" 
+                                : "bg-slate-100 text-slate-600"
+                        }`}>
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+                            </svg>
+                        </div>
+                        <div className="text-center">
+                            <div className={`text-sm font-semibold ${
+                                selectedProvider === "minimax" ? "text-emerald-900" : "text-slate-700"
+                            }`}>
+                                Minimax
+                            </div>
+                            <div className="text-xs text-slate-500 mt-1">
+                                Fast
+                            </div>
+                        </div>
+                        {selectedProvider === "minimax" && (
+                            <div className="flex items-center gap-1 text-xs text-emerald-600 font-medium">
+                                <div className="w-1.5 h-1.5 rounded-full bg-emerald-600"></div>
+                                Active
+                            </div>
+                        )}
+                    </div>
                 </button>
             </div>
 
-            <div className="h-6 text-xs text-center text-gray-500 font-mono">
-                {selectedProvider === "elevenlabs" ? (
-                    <span>High-quality, emotional, expressive</span>
-                ) : (
-                    <span>Ultra-low latency, speech-01-turbo</span>
-                )}
-            </div>
+            <p className="text-xs text-center text-slate-500">
+                {selectedProvider === "elevenlabs" 
+                    ? "High-quality, emotional voice with natural intonation" 
+                    : "Ultra-low latency for real-time conversations"}
+            </p>
         </div>
     );
 }
