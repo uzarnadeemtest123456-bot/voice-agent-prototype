@@ -16,7 +16,7 @@ export default function ConversationPanel({
     // Auto-scroll to bottom
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, [messages, currentAssistantText]);
+    }, [messages, currentAssistantText, processingStage]);
 
     return (
         <div className="flex flex-col h-full">
@@ -32,7 +32,7 @@ export default function ConversationPanel({
             {/* Messages Container */}
             <div className="flex-1 overflow-y-auto space-y-3 pr-2" style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}>
                 {/* Empty state */}
-                {messages.length === 0 && !currentAssistantText && (
+                {messages.length === 0 && !currentAssistantText && !processingStage && (
                     <div className="flex flex-col items-center justify-center h-full text-center space-y-3">
                         <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center border border-blue-100">
                             <svg className="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -96,8 +96,8 @@ export default function ConversationPanel({
                                     <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
                                 </div>
                                 <span className="text-sm font-medium text-slate-600">
-                                    {processingStage === "transcribing" && "Processing voice..."}
-                                    {processingStage === "generating" && "Generating response..."}
+                                    {processingStage === "transcribing" && "Processing Voice"}
+                                    {processingStage === "generating" && "Processing Answer"}
                                 </span>
                             </div>
                         </div>

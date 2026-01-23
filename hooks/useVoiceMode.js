@@ -250,8 +250,9 @@ export function useVoiceMode() {
                 return;
             }
 
-            setStatus("thinking");
+            // Set processing stage BEFORE changing status to ensure it renders
             setProcessingStage("transcribing");
+            setStatus("thinking");
 
             try {
                 const result = await stt.transcribe(audioBlob);
@@ -262,8 +263,10 @@ export function useVoiceMode() {
                     return;
                 }
 
+                // Add user message after transcription completes
                 conversation.addUserMessage(result.text);
 
+                // Change to generating stage
                 setProcessingStage("generating");
                 await handleUserQuery(result.text, conversation.messagesRef.current);
             } catch (err) {
