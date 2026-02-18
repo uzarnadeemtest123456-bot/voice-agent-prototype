@@ -212,8 +212,11 @@ export function useTTS() {
         // Increment request ID to invalidate ongoing TTS
         activeRequestIdRef.current += 1;
 
-        // Stop audio queue
+        // Stop audio queue and immediately sync the new request ID so any
+        // stale in-flight TTS responses that arrive before the next
+        // initializeTTS() call are rejected by the enqueue/enqueueStream guards.
         audioQueueRef.current?.stopAll();
+        audioQueueRef.current?.invalidateRequest(activeRequestIdRef.current);
 
         // Abort all in-flight requests
         for (const controller of ttsAbortControllersRef.current) {
@@ -232,6 +235,28 @@ export function useTTS() {
         const queue = ensureAudioQueue();
         await queue.prime();
     }, [ensureAudioQueue]);
+
+    /**
+     * Warm selected TTS route (and optionally provider runtime) ahead of first turn.
+     */
+    const warmup = useCallback(async (provider = providerRef.current) => {
+        if (provider !== "elevenlabs" && provider !== "minimax") {
+            return;
+        }
+
+        const response = await fetch(`/api/tts/${provider}`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-voice-warmup": "1",
+            },
+            body: "{}",
+        });
+
+        if (!response.ok) {
+            throw new Error(`TTS warmup failed: ${response.status}`);
+        }
+    }, []);
 
     /**
      * Drain audio queue (for retry after unlock)
@@ -269,6 +294,7 @@ export function useTTS() {
         endTextStream,
         stopAll,
         primeAudio,
+        warmup,
         drainQueue,
         isPlaying,
         getQueueSize,

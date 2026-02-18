@@ -7,6 +7,16 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
+// Module-level client — reused across requests within the same serverless instance
+// so the constructor overhead is paid only once per cold start.
+let _openaiClient = null;
+function getOpenAIClient(apiKey) {
+    if (!_openaiClient) {
+        _openaiClient = new OpenAI({ apiKey });
+    }
+    return _openaiClient;
+}
+
 // Simple rate limiting
 const requestCounts = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
@@ -14,6 +24,7 @@ const MAX_REQUESTS_PER_WINDOW = 30; // Max 30 STT requests per minute
 
 const MAX_MAP_SIZE = 10000; // Safety cap to prevent OOM
 const MIN_AUDIO_SIZE_BYTES = 10000;
+const WARMUP_HEADER = 'x-voice-warmup';
 
 function checkRateLimit(identifier) {
   const now = Date.now();
@@ -62,6 +73,15 @@ export async function POST(request) {
       );
     }
 
+    const isWarmup = request.headers.get(WARMUP_HEADER) === '1';
+    if (isWarmup) {
+      return NextResponse.json({
+        success: true,
+        warmup: true,
+        mode: 'compile',
+      });
+    }
+
     // RATE LIMITING: Check rate limit
     const clientId =
       request.headers.get('x-forwarded-for') ||
@@ -96,7 +116,7 @@ export async function POST(request) {
       });
     }
 
-    const openai = new OpenAI({ apiKey });
+    const openai = getOpenAIClient(apiKey);
 
     // Detect audio format more robustly
     const audioType = audioFile.type || '';

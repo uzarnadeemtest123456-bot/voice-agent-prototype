@@ -54,7 +54,25 @@ export function useSTT() {
         };
     }, []);
 
+    /**
+     * Warm STT route so first real transcription avoids cold compile/connection path.
+     * Uses header-only warmup branch on the server; no user query is transcribed.
+     */
+    const warmup = useCallback(async () => {
+        const response = await fetch("/api/stt", {
+            method: "POST",
+            headers: {
+                "x-voice-warmup": "1",
+            },
+        });
+
+        if (!response.ok) {
+            throw new Error(`STT warmup failed: ${response.status}`);
+        }
+    }, []);
+
     return {
         transcribe,
+        warmup,
     };
 }

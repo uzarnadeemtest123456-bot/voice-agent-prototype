@@ -6,6 +6,8 @@
 
 import { NextResponse } from 'next/server';
 
+const WARMUP_HEADER = 'x-voice-warmup';
+
 export async function POST(request) {
     try {
         const apiKey = process.env.MINIMAX_API_KEY;
@@ -16,6 +18,15 @@ export async function POST(request) {
                 { error: 'MINIMAX_API_KEY not configured' },
                 { status: 500 }
             );
+        }
+
+        const isWarmup = request.headers.get(WARMUP_HEADER) === '1';
+        if (isWarmup) {
+            return NextResponse.json({
+                success: true,
+                warmup: true,
+                mode: 'compile',
+            });
         }
 
         const body = await request.json();

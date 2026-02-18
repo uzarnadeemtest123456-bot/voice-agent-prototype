@@ -272,6 +272,17 @@ export function useAipStream() {
 
     useEffect(() => () => cleanup(), [cleanup]);
 
+    // Pre-connect ActionCable WebSocket on mount so the connection is ready
+    // before the user speaks their first query. The subscription guard in
+    // ensureSubscription() prevents a second subscription from being created.
+    useEffect(() => {
+        try {
+            ensureSubscription();
+        } catch (err) {
+            console.warn("ActionCable: could not pre-connect on mount:", err.message);
+        }
+    }, [ensureSubscription]);
+
     return {
         streamQuery,
         abort,

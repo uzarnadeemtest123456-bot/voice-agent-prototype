@@ -133,6 +133,19 @@ export function useAudioRecorder() {
     }, [stopRecording]);
 
     /**
+     * Pre-acquire the mic stream so the first push-to-talk is instant.
+     * Called fire-and-forget from startVoiceMode(); errors are swallowed
+     * because they will surface properly when the user actually presses record.
+     */
+    const warmup = useCallback(async () => {
+        try {
+            await getStream();
+        } catch {
+            // Permission denied or hardware unavailable — will surface on first recording
+        }
+    }, [getStream]);
+
+    /**
      * Check if currently recording
      */
     const isRecording = useCallback(() => {
@@ -144,6 +157,7 @@ export function useAudioRecorder() {
         stopRecording,
         cleanup,
         isRecording,
+        warmup,
         streamRef,
     };
 }

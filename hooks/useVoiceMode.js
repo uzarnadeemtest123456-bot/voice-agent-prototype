@@ -38,6 +38,9 @@ export function useVoiceMode() {
     const speechDurationMsRef = useRef(0);
     const recordingIdRef = useRef(0);
     const activeRecordingIdRef = useRef(0);
+    const sttWarmupDoneRef = useRef(false);
+    const warmedTtsProvidersRef = useRef(new Set());
+    const warmupPromiseRef = useRef(null);
 
     const VOLUME_SAMPLE_INTERVAL_MS = 50;
     const SPEECH_THRESHOLD = 0.02;
@@ -51,14 +54,54 @@ export function useVoiceMode() {
     const aipStream = useAipStream();
     const conversation = useConversation();
 
-    // Sync state to refs
-    useEffect(() => {
-        statusRef.current = status;
-    }, [status]);
+    // Keep statusRef atomically in sync with every setStatus call so that
+    // callbacks (e.g. startPushToTalk's interruption check) never read a
+    // stale value. The old useEffect approach updated the ref one render
+    // cycle later, which caused handleInterruption() to be skipped when
+    // the user pressed push-to-talk in the brief window before the effect ran.
+    const setStatusWithRef = (newStatus) => {
+        statusRef.current = newStatus;
+        setStatus(newStatus);
+    };
 
     useEffect(() => {
         processingStageRef.current = processingStage;
     }, [processingStage]);
+
+    const prewarmSpeechStack = useCallback(
+        (provider) => {
+            if (warmupPromiseRef.current) return warmupPromiseRef.current;
+
+            const tasks = [];
+
+            if (!sttWarmupDoneRef.current) {
+                tasks.push(
+                    stt.warmup().then(() => {
+                        sttWarmupDoneRef.current = true;
+                    })
+                );
+            }
+
+            if (provider && !warmedTtsProvidersRef.current.has(provider)) {
+                tasks.push(
+                    tts.warmup(provider).then(() => {
+                        warmedTtsProvidersRef.current.add(provider);
+                    })
+                );
+            }
+
+            if (tasks.length === 0) {
+                return Promise.resolve();
+            }
+
+            warmupPromiseRef.current = Promise.allSettled(tasks).finally(() => {
+                warmupPromiseRef.current = null;
+            });
+
+            return warmupPromiseRef.current;
+        },
+        [stt, tts]
+    );
 
     // Handle interruption logic
     const handleInterruption = useCallback(() => {
@@ -73,7 +116,7 @@ export function useVoiceMode() {
         pendingTextUpdateRef.current = false;
         setCurrentAssistantText("");
         setProcessingStage("");
-        setStatus("listening");
+        setStatusWithRef("listening");
     }, [tts, aipStream]);
 
 
@@ -197,6 +240,14 @@ export function useVoiceMode() {
             recordingIdRef.current = recordingId;
             activeRecordingIdRef.current = recordingId;
 
+            // Give warmup a brief head start before first recording.
+            if (warmupPromiseRef.current) {
+                await Promise.race([
+                    warmupPromiseRef.current,
+                    new Promise((resolve) => setTimeout(resolve, 800)),
+                ]);
+            }
+
             await vad.resumeAudioContext();
 
             const stream = await recorder.startRecording(
@@ -208,11 +259,11 @@ export function useVoiceMode() {
 
             startVolumeMonitor(stream);
 
-            setStatus("recording");
+            setStatusWithRef("recording");
         } catch (err) {
             console.error("Error starting recording:", err);
             setError("Could not access microphone. Please grant permission.");
-            setStatus("error");
+            setStatusWithRef("error");
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [recorder, vad, handleInterruption, startVolumeMonitor]);
@@ -237,7 +288,7 @@ export function useVoiceMode() {
 
             stopVolumeMonitor();
             if (!audioBlob) {
-                setStatus("listening");
+                setStatusWithRef("listening");
                 setProcessingStage("");
                 return;
             }
@@ -245,20 +296,20 @@ export function useVoiceMode() {
             speechDurationMsRef.current = 0;
 
             if (speechDurationMs < MIN_SPEECH_MS) {
-                setStatus("listening");
+                setStatusWithRef("listening");
                 setProcessingStage("");
                 return;
             }
 
             // Set processing stage BEFORE changing status to ensure it renders
             setProcessingStage("transcribing");
-            setStatus("thinking");
+            setStatusWithRef("thinking");
 
             try {
                 const result = await stt.transcribe(audioBlob);
 
                 if (result.filtered || result.text.length === 0) {
-                    setStatus("listening");
+                    setStatusWithRef("listening");
                     setProcessingStage("");
                     return;
                 }
@@ -272,11 +323,11 @@ export function useVoiceMode() {
             } catch (err) {
                 console.error("Error processing recording:", err);
                 setError(`Error: ${err.message}`);
-                setStatus("error");
+                setStatusWithRef("error");
                 setProcessingStage("");
 
                 setTimeout(() => {
-                    setStatus("listening");
+                    setStatusWithRef("listening");
                     setError(null);
                 }, 3000);
             }
@@ -294,7 +345,7 @@ export function useVoiceMode() {
             const myTurn = activeTurnIdRef.current;
             completedTurnsRef.current.delete(myTurn);
 
-            setStatus("thinking");
+            setStatusWithRef("thinking");
             setCurrentAssistantText("");
             assistantTextBufferRef.current = "";
             ttsMarkerBufferRef.current = "";
@@ -302,14 +353,14 @@ export function useVoiceMode() {
             // Initialize TTS
             tts.initializeTTS(myTurn, {
                 onPlaybackStart: () => {
-                    setStatus("speaking");
+                    setStatusWithRef("speaking");
                 },
                 onPlaybackComplete: () => {
                     if (
                         statusRef.current === "speaking" &&
                         activeTurnIdRef.current === myTurn
                     ) {
-                        setStatus("listening");
+                        setStatusWithRef("listening");
                     }
                 },
                 onAutoplayBlocked: () => {
@@ -361,10 +412,10 @@ export function useVoiceMode() {
                 if (err.name === "AbortError") return;
                 console.error("Error handling query:", err);
                 setError(`Error: ${err.message}`);
-                setStatus("error");
+                setStatusWithRef("error");
 
                 setTimeout(() => {
-                    setStatus("listening");
+                    setStatusWithRef("listening");
                     setError(null);
                 }, 3000);
             }
@@ -405,9 +456,8 @@ export function useVoiceMode() {
 
         if (!hasAudioToPlay) {
             if (myTurn && activeTurnIdRef.current !== myTurn) return;
-            setStatus("listening");
+            setStatusWithRef("listening");
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tts, conversation]);
 
     /**
@@ -417,12 +467,18 @@ export function useVoiceMode() {
         try {
             setError(null);
             setNeedsAudioUnlock(false);
-            setStatus("listening");
+            setStatusWithRef("listening");
             setProcessingStage("");
             completedTurnsRef.current.clear();
 
             // Ensure TTS provider is set
             tts.setProvider(ttsProvider);
+
+            // Warm STT/TTS endpoints ahead of first real query without touching AIP generation.
+            void prewarmSpeechStack(ttsProvider);
+
+            // Pre-acquire mic stream so first push-to-talk has no hardware setup delay
+            recorder.warmup();
 
             await unlockSafariAudio();
             await tts.primeAudio();
@@ -433,10 +489,10 @@ export function useVoiceMode() {
         } catch (err) {
             console.error("Error starting voice mode:", err);
             setError(`Error: ${err.message}`);
-            setStatus("error");
+            setStatusWithRef("error");
             setNeedsAudioUnlock(true);
         }
-    }, [unlockSafariAudio, tts, ttsProvider, conversation]);
+    }, [unlockSafariAudio, tts, ttsProvider, conversation, recorder, prewarmSpeechStack]);
 
     /**
      * Handle audio unlock retry
@@ -448,7 +504,7 @@ export function useVoiceMode() {
             setNeedsAudioUnlock(false);
 
             if (statusRef.current === "idle") {
-                setStatus("listening");
+                setStatusWithRef("listening");
             } else {
                 tts.drainQueue();
             }
